@@ -5,7 +5,10 @@
       "Bash(.venv/Scripts/python -c ' *)",
       "Bash(.venv/Scripts/python -m pytest tests/test_schemas.py::test_run_state_defaults -v)",
       "Bash(.venv/Scripts/python -m pytest tests/ -q)",
-      "Bash(grep -v \":0$\")"
+      "Bash(grep -v \":0$\")",
+      "Bash(python -m pytest tests/test_aap_tokens.py -v)",
+      "Bash(pip install *)",
+      "Bash(python -m pytest tests/test_aap_tokens.py --tb=short -q)"
     ]
   }
 }
