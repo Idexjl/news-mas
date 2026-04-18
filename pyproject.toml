@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "news-mas"
+version = "0.1.0"
+description = "Multi-agent news intelligence system"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph",
+    "langchain",
+    "anthropic",
+    "langsmith",
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic>=2.0",
+    "presidio-analyzer",
+    "presidio-anonymizer",
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp",
+    "slowapi",
+    "python-dotenv",
+    "tavily-python",
+    "ollama",
+    "httpx",
+    "apscheduler",
+    "asyncpg",
+    "alembic",
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]

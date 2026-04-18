@@ -1,0 +1,81 @@
+# === Secrets — never commit these ===
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+secrets/
+credentials/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+MANIFEST
+
+# === Virtual environments ===
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.virtualenv/
+
+# === Testing / coverage ===
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+nosetests.xml
+coverage.xml
+*.cover
+
+# === Type checkers ===
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyright/
+.ruff_cache/
+
+# === Jupyter ===
+.ipynb_checkpoints/
+*.ipynb
+
+# === IDEs ===
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === Docker ===
+docker-compose.override.yml
+
+# === Observability data (local volumes) ===
+volumes/
+data/
+
+# === Alembic ===
+alembic/versions/*.pyc
+
+# === Build artifacts ===
+*.log
+*.pid
+*.seed
+*.pid.lock
