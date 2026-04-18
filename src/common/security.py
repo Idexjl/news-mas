@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 import re
 import unicodedata
-from typing import Final
+from typing import Any, Final, Protocol
 
 # ── Injection / attack detection patterns ────────────────────────────────────
 
@@ -70,6 +71,61 @@ def detect_injection(text: str) -> list[str]:
 def is_safe_input(text: str) -> bool:
     """Return True only when no injection patterns are detected."""
     return len(detect_injection(text)) == 0
+
+
+# ── Run-level circuit breaker ─────────────────────────────────────────────────
+
+# Statuses that mean the orchestrator has halted this run.
+# Any agent that receives a valid token for one of these runs must refuse the
+# work — this is the primary operational control for the Entra introspection gap.
+# See DPOP_IMPLEMENTATION_GUIDE.md §3.6.
+_INACTIVE_STATUSES: Final[frozenset[str]] = frozenset({"cancelled", "killed", "interrupted"})
+
+
+class _RunStore(Protocol):
+    """Structural protocol — any object with a load(collection, id) method qualifies."""
+
+    def load(self, collection: str, id: str) -> dict[str, Any]: ...  # noqa: A002
+
+
+def is_run_active(
+    run_id: str,
+    *,
+    storage: _RunStore,
+    aap_claims: dict[str, Any] | None = None,
+    logger: logging.Logger | None = None,
+) -> bool:
+    """
+    Return True when *run_id* is active and work should proceed.
+    Return False when the run has been cancelled, killed, or interrupted.
+
+    A run not yet present in storage is treated as active (fail-open), which
+    allows agents to process requests before the orchestrator has persisted the
+    initial run state.
+
+    When the run is inactive but the caller presented a valid auth token, the
+    situation is a security event: a token outlived the work it was issued for.
+    A WARNING is logged with the full *aap_claims* dict for forensic triage.
+    """
+    _log = logger or logging.getLogger(__name__)
+    try:
+        run = storage.load("runs", run_id)
+    except KeyError:
+        return True  # run not yet persisted — let it through
+
+    status: str = str(run.get("status", "")).lower()
+    if status in _INACTIVE_STATUSES:
+        _log.warning(
+            "circuit_breaker_triggered: run inactive but token still valid",
+            extra={
+                "run_id": run_id,
+                "run_status": status,
+                "aap_claims": aap_claims,
+                "security_event": True,
+            },
+        )
+        return False
+    return True
 
 
 # [DPOP-TODO] validate_shared_secret is a development-only authentication

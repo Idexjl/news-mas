@@ -9,7 +9,8 @@
       "Bash(python -m pytest tests/test_aap_tokens.py -v)",
       "Bash(pip install *)",
       "Bash(python -m pytest tests/test_aap_tokens.py --tb=short -q)",
-      "Bash(python -m pytest tests/test_storage.py -v)"
+      "Bash(python -m pytest tests/test_storage.py -v)",
+      "Bash(python -m pytest tests/test_security.py -v)"
     ]
   }
 }

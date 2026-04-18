@@ -149,8 +149,35 @@ preventing token theft and replay. The receiving agent validates the token and p
 `DPoPAuthMiddleware` (`src/common/auth/middleware.py`) before the request reaches the
 handler.
 
-The full rollout plan is in `DPOP_IMPLEMENTATION_GUIDE.md`. All stub functions in
-`src/common/auth/` are tagged `[DPOP-TODO]` to mark the exact insertion points.
+### Token revocation and the introspection gap
+
+Entra ID does not support RFC 7662 token introspection. Tokens are self-contained JWTs
+validated locally by each resource server — there is no callback to Entra to confirm a
+token is still valid. A revoked token remains usable until its `exp` claim passes.
+
+DPoP partially closes this gap:
+- The token is bound to the holder's private key, so intercepting it alone is not enough
+- A fresh proof is required on every request; proofs expire within 60–120 seconds
+- Each proof is bound to a specific HTTP method + URI, so it cannot be reused across calls
+
+**Combined mitigation strategy for production:**
+
+| Layer | Measure |
+|---|---|
+| Token lifetime | 15-minute TTL on all agent access tokens — limits the blast radius of a leaked token |
+| DPoP binding | Stolen token is useless without the corresponding private key |
+| CAE | Continuous Access Evaluation — resource servers subscribe to Entra revocation events and reject tokens inline (deferred; see §12) |
+| Circuit breaker | Orchestrator marks the `run_id` as cancelled in `FernetStorage`; agents check run state before processing and refuse work even if their token is still technically valid |
+
+The circuit breaker is the most immediately actionable layer. It requires no additional
+infrastructure: the storage layer already exists, cancelling a run is a single
+`storage.save("runs", run_id, {..., "status": "cancelled"})` call, and agents can check
+that field before performing any work. This makes the work item — not the credential —
+the revocable unit, which is effective regardless of token lifetime.
+
+The full rollout plan is in `DPOP_IMPLEMENTATION_GUIDE.md` (§3.6 covers the revocation
+strategy in detail). All stub functions in `src/common/auth/` are tagged `[DPOP-TODO]`
+to mark the exact insertion points.
 
 ---
 
@@ -443,6 +470,7 @@ without changing any repository or caller code.
 | **User feedback UI** | Product decision: web UI vs. email reply vs. API | Storage layer is built (§11); no frontend work started. |
 | **Offline eval framework** | Feedback data accumulation | Needs a labelled dataset from real runs before an eval harness is useful. |
 | **AAP → DPoP token binding** | Same as DPoP rollout | Three `[DPOP-TODO]` points in `src/auth/token_service.py` mark the exact swap. HS256 shared-secret is interim only. |
+| **CAE (Continuous Access Evaluation)** | Entra CAE subscription + resource server event handler | Closes the introspection gap — tokens can be invalidated mid-lifetime. See §4 and `DPOP_IMPLEMENTATION_GUIDE.md §3.6`. Implement after DPoP Phase 5 is complete. |
 | **Feedback-driven threshold tuning** | `candidate_override` and `topic_relevance` data | `HeatScorer` and `RelevanceGate` thresholds are currently static constants; they will become learned from feedback. |
 
 ---

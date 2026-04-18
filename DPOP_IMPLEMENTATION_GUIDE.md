@@ -292,6 +292,156 @@ az ad app permission admin-consent --id <calling_client_id>
 `DPoPAuthMiddleware` can then verify `"AgentCaller" in claims.get("roles", [])`
 as an additional layer of authorisation beyond token validity.
 
+### 3.6 The Entra ID Introspection Gap and Compensating Controls
+
+#### No RFC 7662 support
+
+Entra ID does not implement RFC 7662 token introspection. Each resource server
+(agent) validates tokens locally by verifying the JWT signature against the Entra
+JWKS endpoint and checking standard claims (`iss`, `aud`, `exp`, `nbf`). There is
+no runtime callback to Entra to confirm a token is still valid.
+
+Consequence: a credential that has been revoked in Entra — for example, because a
+client secret was rotated after a suspected compromise — produces tokens that remain
+accepted by every resource server until their `exp` claim passes. For this system's
+15-minute agent token lifetime, the worst-case enforcement window is 15 minutes.
+
+This is a known limitation of the self-contained JWT model and applies to all
+Entra-protected services, not just news-mas.
+
+#### DPoP as blast radius limiter
+
+DPoP does not close the revocation window, but it substantially limits what an
+attacker can do with a stolen token.
+
+| Threat | Without DPoP | With DPoP |
+|--------|:-----------:|:---------:|
+| Stolen Bearer token replayed from any host | ✅ Full access | — |
+| Stolen DPoP token used without private key | — | ❌ `cnf/jkt` mismatch |
+| Token replayed at a different URI or method | ✅ Exploitable | ❌ `htm`/`htu` mismatch |
+| Proof reused after its 60–120 s window | ✅ Exploitable | ❌ `iat` out of window |
+| Proof replayed within window (different `jti`) | ✅ Exploitable | ❌ `jti` replay rejected |
+
+DPoP converts a stolen token from a universal pass into a narrow credential that
+requires the matching private key, a fresh proof for each exact endpoint, and
+continuous key possession. An attacker who controls the token but not the key gains
+nothing. DPoP does not help if both the token and the private key are compromised;
+short TTLs are the backstop for that scenario.
+
+#### Short token lifetime strategy
+
+Set `expires_in` to **900 seconds (15 minutes)** on all agent app registrations.
+
+```
+Azure Portal → App registrations → {agent} → Token configuration
+  → Access token lifetime → 900
+```
+
+Or via the Entra token lifetime policy API:
+
+```bash
+az ad app update --id <client_id> \
+  --set "tokenLifetimePolicies=[{\"definition\":[{\"TokenLifetimePolicy\":{\"Version\":1,\"AccessTokenLifetime\":\"00:15:00\"}}]}]"
+```
+
+Why 15 minutes specifically:
+- Long enough that normal pipeline runs (typically 3–8 minutes end-to-end) complete
+  without mid-run re-authentication
+- Short enough that a revoked credential's window is operationally manageable
+- Matches Entra's DPoP proof nonce window, simplifying clock-skew reasoning
+
+This is the single most effective passive control: it works regardless of whether
+DPoP, CAE, or the circuit breaker is in place.
+
+#### Run-level circuit breaker — primary operational control
+
+The circuit breaker is the **primary active control** for the introspection gap. It
+does not wait for token expiry: the orchestrator marks a run as cancelled and agents
+refuse work immediately, even if their token remains valid.
+
+**Implementation — `src/common/security.py`:**
+
+```python
+from src.common.security import is_run_active
+
+# In every agent's /run handler, before any work:
+if not is_run_active(request.run_id, storage=storage, aap_claims=token_claims, logger=logger):
+    raise HTTPException(status_code=409, detail="Run has been cancelled")
+```
+
+`is_run_active()` checks `FernetStorage` for the run's `status` field. Statuses
+`cancelled`, `killed`, and `interrupted` all return `False`. A run that does not
+yet exist in storage returns `True` (fail-open, to allow agents to start before the
+orchestrator has persisted the initial state).
+
+**Critically:** when the run is inactive but the auth token is still valid,
+`is_run_active()` emits a `WARNING` log tagged `security_event: true` with the full
+AAP claims dict. This is the forensic signal: a valid token was presented for a
+cancelled run, which means either a slow/delayed agent or a replayed request.
+
+**Orchestrator — cancelling a run:**
+
+```python
+# Immediate — no Entra interaction needed
+storage.save("runs", run_id, {**current_state, "status": "cancelled"})
+```
+
+Why this is the primary control:
+- **Immediate:** takes effect on the next agent request, not after token expiry
+- **No infra:** uses `FernetStorage`, which is already deployed
+- **Layered correctly:** the token controls *who may call*; the run state controls
+  *whether work should proceed* — these are orthogonal concerns
+- **Audit-friendly:** the WARNING log captures the exact AAP claims at the moment
+  of the violation, giving forensic detail that token revocation alone cannot provide
+
+#### CAE as partial mitigation (deferred)
+
+Continuous Access Evaluation (RFC 9700 / Entra CAE) allows resource servers to
+subscribe to near-real-time revocation notifications from Entra. When a credential
+is revoked, participating resource servers are notified within seconds and reject
+the token without waiting for `exp`.
+
+CAE would close the introspection gap entirely for scenarios where the Entra
+credential itself is revoked (not just the run). It is deferred because:
+
+1. All eight agents must implement the `claims_challenge` round-trip simultaneously
+2. `DPoPAuthMiddleware` must handle `401 insufficient_claims` and re-authenticate
+3. This is an operational risk during active development
+
+CAE requirements (for Phase 7):
+- Add `xms_cc: {values: ["CP1"]}` to the `claims` parameter of every token request
+  to signal CAE participation to Entra
+- Handle `WWW-Authenticate: Bearer error="insufficient_claims"` in middleware —
+  parse the `claims` challenge, re-acquire token with the challenge embedded, retry
+- Integration test: force-revoke a credential mid-run; confirm rejection within the
+  CAE notification window (target: < 30 seconds)
+
+#### Defence-in-depth summary
+
+| Control | Scope | Latency to enforce | Status |
+|---|---|---|---|
+| Short token TTL (15 min) | All token abuse | Up to 15 min | Implement now |
+| DPoP binding | Replay / theft without key | Per-request (60–120 s proof window) | Phase 1–5 |
+| `is_run_active()` circuit breaker | Work-level cancellation | Next agent request | **Implemented** |
+| CAE | Credential revocation events | < 30 s | Phase 7 (deferred) |
+
+#### Implementation order
+
+```
+Now
+ ├── Set 15-min token TTL on all 8 app registrations
+ └── Call is_run_active() at the top of every agent /run handler
+
+Phase 1–5  (DPoP rollout — this guide)
+ └── DPoP binding reduces blast radius of any leaked token
+
+After Phase 5
+ └── Phase 7 — CAE
+      ├── Add xms_cc CP1 capability claim to all token requests
+      ├── Implement claims_challenge handler in DPoPAuthMiddleware
+      └── Red-team: force-revoke credential mid-run; confirm < 30 s enforcement
+```
+
 ---
 
 ## 4. Implementation Checklist
@@ -352,6 +502,19 @@ as an additional layer of authorisation beyond token validity.
 - [ ] Red-team: confirm Bearer token (without DPoP proof) returns 401
 - [ ] Red-team: confirm replayed DPoP proof returns 401
 - [ ] Red-team: confirm token from agent A cannot be used by agent B (cnf/jkt mismatch)
+
+### Phase 7 — Continuous Access Evaluation (after Phase 5 complete)
+
+See §3.6 for the full rationale and implementation detail.
+
+- [ ] Set 15-minute access token TTL on all 8 app registrations (Azure Portal or policy API)
+- [ ] Add `run_id` status check at the top of every agent `/run` handler (circuit breaker)
+- [ ] Add CP1 capability claim (`xms_cc`) to all `get_client_credentials_token()` calls
+- [ ] Implement `claims_challenge` handler in `DPoPAuthMiddleware` — parse
+      `WWW-Authenticate` header, embed challenge in re-authentication request, retry
+- [ ] Integration test: force-revoke an agent credential mid-run; confirm the next
+      call to that agent returns 401 within the CAE notification window (target: < 30 s)
+- [ ] Update `validate_entra_token()` to check `xms_cc` claim presence in CAE-capable tokens
 
 ---
 
