@@ -102,8 +102,8 @@ async def test_live_search_otel_spans_created(span_tracer):
     assert any("search_worker.search" in n for n in span_names), (
         f"Expected search_worker.search span. Got: {span_names}"
     )
-    assert any("search_worker.fetch" in n for n in span_names), (
-        f"Expected search_worker.fetch span. Got: {span_names}"
+    assert any("egress.http.fetch" in n for n in span_names), (
+        f"Expected egress.http.fetch span. Got: {span_names}"
     )
 
     # No span attribute should contain the literal text of an article.
@@ -119,3 +119,50 @@ async def test_live_search_otel_spans_created(span_tracer):
                     f"Span '{span.name}' attribute '{key}' looks like raw content "
                     f"(length {len(value)})"
                 )
+
+
+@pytest.mark.asyncio
+async def test_live_search_egress_tavily_span(span_tracer):
+    """Verifies egress.tavily.search span is emitted with correct metadata attributes."""
+    tracer, exporter = span_tracer
+    inp = SearchWorkerInput(
+        run_id="integration-test-egress-01",
+        topics=["AI agents news"],
+        since_days=7,
+        max_results_per_topic=2,
+    )
+
+    await run_agent(inp, tracer=tracer)
+
+    spans = exporter.get_finished_spans()
+    tavily_spans = [s for s in spans if s.name == "egress.tavily.search"]
+
+    assert tavily_spans, (
+        f"Expected egress.tavily.search span. Got: {[s.name for s in spans]}"
+    )
+
+    tavily_span = tavily_spans[0]
+    attrs = tavily_span.attributes
+
+    # Required egress attributes
+    assert attrs.get("egress.host") == "api.tavily.com", (
+        f"egress.host should be 'api.tavily.com', got: {attrs.get('egress.host')}"
+    )
+    assert "tavily.query_length" in attrs, "Missing tavily.query_length attribute"
+    assert isinstance(attrs["tavily.query_length"], int), "tavily.query_length must be int"
+    assert attrs["tavily.query_length"] > 0, "tavily.query_length must be positive"
+
+    # Must NOT contain raw query content — only the length
+    _CONTENT_KEYS = {"query", "content", "text", "body", "article", "summary", "raw"}
+    for key in attrs:
+        assert key.lower() not in _CONTENT_KEYS, (
+            f"egress.tavily.search span contains forbidden attribute '{key}'"
+        )
+
+    # No attribute value should look like raw content
+    for key, value in attrs.items():
+        if isinstance(value, str):
+            assert len(value) < 2000, (
+                f"egress.tavily.search attribute '{key}' looks like raw content "
+                f"(length {len(value)})"
+            )

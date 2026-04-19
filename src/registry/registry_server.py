@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hmac
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -38,7 +39,24 @@ logger = get_logger(__name__)
 _SECRET_KEY = os.getenv("MAS_SECRET_KEY", "dev-secret")
 
 limiter = Limiter(key_func=get_remote_address)
-app = FastAPI(title="Agent Registry")
+async def startup() -> None:
+    """Seed default AgentConfig records. Called on startup and directly in tests."""
+    existing = {c.agent_id for c in card_store.list_agent_configs()}
+    seeded = 0
+    for config in _DEFAULTS:
+        if config.agent_id not in existing:
+            card_store.save_agent_config(config)
+            seeded += 1
+    logger.info("registry_seeded", extra={"seeded": seeded, "total": len(_DEFAULTS)})
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    await startup()
+    yield
+
+
+app = FastAPI(title="Agent Registry", lifespan=_lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -187,19 +205,6 @@ def _require_config_write(authorization: str | None) -> None:
         )
 
 
-# ── Startup ────────────────────────────────────────────────────────────────────
-
-@app.on_event("startup")
-async def startup() -> None:
-    existing = {c.agent_id for c in card_store.list_agent_configs()}
-    seeded = 0
-    for config in _DEFAULTS:
-        if config.agent_id not in existing:
-            card_store.save_agent_config(config)
-            seeded += 1
-    logger.info("registry_seeded", extra={"seeded": seeded, "total": len(_DEFAULTS)})
-
-
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -216,6 +221,28 @@ async def get_defaults():
 @app.get("/agents/{agent_id}/config", response_model=AgentConfig)
 @limiter.limit("60/minute")
 async def get_agent_config(agent_id: str, request: Request):
+    """
+    Fetch an agent's config. Called by every agent at startup via bootstrap_agent().
+
+    [SIEM-TODO] Each call to this endpoint is an agent "registration" event —
+    an agent is announcing its presence and fetching its operating parameters.
+    These events feed Sentinel UEBA to build a behavioral baseline per agent:
+      - Expected call frequency: each agent calls once at startup. A second
+        call from the same agent_id within the same deployment window is
+        anomalous (possible restart loop or bootstrap failure storm).
+      - Expected source subnet: the request source IP should be within the
+        mas-compute or mas-orchestration subnet. A call from outside those
+        ranges (especially from mas-identity or external) is a high-severity
+        incident — the registry should not be reachable from outside the
+        intended tiers (enforced by NSG; this log is defence-in-depth).
+      - Expected agent_id set: Sentinel can alert on requests for agent IDs
+        that do not exist in the seeded defaults — a probe for undocumented
+        endpoints or a misconfigured agent.
+      In production, emit a structured log event here:
+        {"event": "agent_bootstrap", "agent_id": agent_id, "source_ip": ...}
+      so Sentinel can join bootstrap events with the agent's first AAP token
+      mint event (same agent_id, close timestamps) to confirm normal startup.
+    """
     try:
         config = card_store.get_agent_config(agent_id)
     except KeyError as exc:

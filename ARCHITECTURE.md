@@ -384,8 +384,38 @@ mas-observability  (external)        ← OTel, Jaeger, Prometheus, Grafana, Loki
 Each agent calls `setup_telemetry(service_name)` on startup
 (`src/common/observability.py`). This registers an `OTLPSpanExporter` pointed at
 `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4317`) and wires a
-`BatchSpanProcessor`. The `service.name` resource attribute is set to the agent name,
-so traces in Jaeger are grouped per agent.
+`BatchSpanProcessor`. The `service.name` resource attribute is read from the
+`SERVICE_NAME` env var (with the agent module name as fallback) so traces in Jaeger
+are grouped per agent. Each docker-compose agent service sets `SERVICE_NAME` explicitly.
+
+`setup_metrics(service_name)` registers an `OTLPMetricExporter` on the same endpoint
+with a 10-second `PeriodicExportingMetricReader`. Metrics are namespaced `mas.egress.*`
+and exported through the OTel collector to Prometheus.
+
+The OTel collector config (`configs/otel-collector-config.yaml`) includes a `resource`
+processor that preserves `service.name` from the application and stamps
+`deployment.environment=local-dev` on all telemetry. The resource processor runs before
+the Jaeger and Prometheus exporters in all three pipelines (traces, metrics, logs).
+
+Egress spans emitted by the search worker:
+- `egress.tavily.search` — wraps each Tavily API call with query_length, response_time_ms, and results_returned. Never captures query content.
+- `egress.http.fetch` — wraps each article fetch with hostname only (not full URL), pii_count, scrubbed, and injection_detected flags.
+
+Egress metrics (Prometheus, via OTel collector):
+- `news_mas_mas_egress_tavily_calls_total`
+- `news_mas_mas_egress_tavily_errors_total`
+- `news_mas_mas_egress_tavily_query_length` (histogram)
+- `news_mas_mas_egress_tavily_response_time_ms` (histogram)
+- `news_mas_mas_egress_fetch_calls_total`
+- `news_mas_mas_egress_injection_detected_total`
+
+Prometheus alerting rules are in `prometheus/alerts.yml` (mounted into the Prometheus
+container). Alerts: `EgressInjectionDetected` (high), `TavilyAnomalousQueryLength` (medium),
+`TavilyHighCallVolume` (medium).
+
+Grafana dashboard `configs/grafana/provisioning/dashboards/egress.json` shows Tavily
+call rate, query length distribution, fetch response time, injection detection count,
+and error rate.
 
 ### Observability split — LangSmith vs OTel/Jaeger/Grafana
 

@@ -72,6 +72,8 @@ services:
       dockerfile: Dockerfile.auth-server
     container_name: auth-server
     env_file: .env
+    environment:
+      SERVICE_NAME: news-mas-auth-server
     ports:
       - "8000:8000"
     networks:
@@ -89,6 +91,8 @@ services:
       dockerfile: Dockerfile.registry
     container_name: registry
     env_file: .env
+    environment:
+      SERVICE_NAME: news-mas-registry
     networks:
       - mas-identity
       - mas-observability
@@ -115,6 +119,8 @@ services:
         PHASE: "1"
     container_name: orchestrator-phase1
     env_file: .env
+    environment:
+      SERVICE_NAME: news-mas-orchestrator-1
     networks:
       - mas-identity
       - mas-orchestration
@@ -132,6 +138,8 @@ services:
         PHASE: "2"
     container_name: orchestrator-phase2
     env_file: .env
+    environment:
+      SERVICE_NAME: news-mas-orchestrator-2
     networks:
       - mas-identity
       - mas-orchestration
@@ -152,6 +160,8 @@ services:
     build: { context: ., dockerfile: Dockerfile.agent, args: { AGENT: search_worker } }
     container_name: search-worker
     env_file: .env
+    environment:
+      SERVICE_NAME: news-mas-search-worker
     ports:
       - "8001:8001"
     networks:
@@ -167,6 +177,8 @@ services:
     build: { context: ., dockerfile: Dockerfile.agent, args: { AGENT: heat_scorer } }
     container_name: heat-scorer
     env_file: .env
+    environment:
+      SERVICE_NAME: news-mas-heat-scorer
     ports:
       - "8002:8002"
     networks:
@@ -181,6 +193,8 @@ services:
     build: { context: ., dockerfile: Dockerfile.agent, args: { AGENT: filter_agent } }
     container_name: filter-agent
     env_file: .env
+    environment:
+      SERVICE_NAME: news-mas-filter-agent
     ports:
       - "8003:8003"
     networks:
@@ -194,6 +208,8 @@ services:
     build: { context: ., dockerfile: Dockerfile.agent, args: { AGENT: selector } }
     container_name: selector
     env_file: .env
+    environment:
+      SERVICE_NAME: news-mas-selector
     ports:
       - "8004:8004"
     networks:
@@ -207,6 +223,8 @@ services:
     build: { context: ., dockerfile: Dockerfile.agent, args: { AGENT: phase1_judge } }
     container_name: phase1-judge
     env_file: .env
+    environment:
+      SERVICE_NAME: news-mas-phase1-judge
     ports:
       - "8005:8005"
     networks:
@@ -222,6 +240,8 @@ services:
     build: { context: ., dockerfile: Dockerfile.agent, args: { AGENT: summarizer } }
     container_name: summarizer
     env_file: .env
+    environment:
+      SERVICE_NAME: news-mas-summarizer
     ports:
       - "8006:8006"
     networks:
@@ -237,6 +257,8 @@ services:
     build: { context: ., dockerfile: Dockerfile.agent, args: { AGENT: reviewer } }
     container_name: reviewer
     env_file: .env
+    environment:
+      SERVICE_NAME: news-mas-reviewer
     ports:
       - "8007:8007"
     networks:
@@ -253,6 +275,8 @@ services:
     build: { context: ., dockerfile: Dockerfile.agent, args: { AGENT: relevance_gate } }
     container_name: relevance-gate
     env_file: .env
+    environment:
+      SERVICE_NAME: news-mas-relevance-gate
     ports:
       - "8008:8008"
     networks:
@@ -273,16 +297,43 @@ services:
     # only cross-tier communication allowed on mas-observability. Azure: deploy
     # in Management subnet; agents reach it via Private Endpoint to avoid
     # telemetry traversing a public load balancer.
+    #
+    # [SIEM-TODO] The collector config swap for production Sentinel integration:
+    #   Local (current):   traces → otlp/jaeger, metrics → prometheus, logs → loki
+    #   Production target: traces → azuremonitor + otlp/jaeger (dual-write during
+    #                      transition), metrics → azuremonitor + prometheus,
+    #                      logs   → azuremonitor + loki
+    #
+    #   In configs/otel-collector-config.yaml, add under exporters:
+    #     azuremonitor:
+    #       connection_string: "${AZURE_MONITOR_CONNECTION_STRING}"
+    #       # Connection string from the Application Insights / Log Analytics
+    #       # workspace linked to the Sentinel workspace. Set in Key Vault;
+    #       # injected via Managed Identity at collector startup.
+    #
+    #   The resource processor already stamps service.name and
+    #   deployment.environment on all telemetry — these become the entity
+    #   keys in Sentinel's entity graph. No additional annotation needed.
+    #
+    #   The collector container must run with Managed Identity in production
+    #   so the azuremonitor exporter can authenticate without a stored key.
+    #   See src/common/SIEM_INTEGRATION_GUIDE.md §OTel Connector Configuration.
     image: otel/opentelemetry-collector-contrib:0.99.0
     container_name: otel-collector
-    command: ["--config=/etc/otel-collector-config.yaml"]
+    command:
+      - "--config=/etc/otel-collector-config.yaml"
+      - "--feature-gates=+component.UseLocalHostAsDefaultHost"
     volumes:
       - ./configs/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
     ports:
-      - "4317:4317"    # OTLP gRPC
-      - "4318:4318"    # OTLP HTTP
-      - "8888:8888"    # Collector metrics (Prometheus scrape target)
-      - "8889:8889"    # Prometheus exporter (app metrics)
+      # Host-side localhost binding — not exposed to local network.
+      # Change to 0.0.0.0 only if you need LAN access to the collector.
+      # [NETWORK-SEGMENTATION-TODO] In Azure, these services are not
+      # port-exposed at all — access is via Azure Private Link or VPN only.
+      - "127.0.0.1:4317:4317"    # OTLP gRPC
+      - "127.0.0.1:4318:4318"    # OTLP HTTP
+      - "127.0.0.1:8888:8888"    # Collector self-metrics (Prometheus scrape target)
+      - "127.0.0.1:8889:8889"    # Prometheus exporter (app metrics)
     networks:
       - mas-observability
     depends_on:
@@ -299,9 +350,13 @@ services:
     environment:
       - COLLECTOR_OTLP_ENABLED=true
     ports:
-      - "16686:16686"  # Jaeger UI
-      - "14250:14250"  # gRPC (collector → Jaeger)
-      - "14268:14268"  # HTTP collector
+      # Host-side localhost binding — not exposed to local network.
+      # Change to 0.0.0.0 only if you need LAN access to dashboards.
+      # [NETWORK-SEGMENTATION-TODO] In Azure, these services are not
+      # port-exposed at all — access is via Azure Private Link or VPN only.
+      - "127.0.0.1:16686:16686"  # Jaeger UI
+      - "127.0.0.1:14250:14250"  # gRPC (collector → Jaeger)
+      - "127.0.0.1:14268:14268"  # HTTP collector
     networks:
       - mas-observability
 
@@ -317,9 +372,14 @@ services:
       - "--storage.tsdb.retention.time=15d"
     volumes:
       - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus_data:/prometheus
     ports:
-      - "9090:9090"
+      # Host-side localhost binding — not exposed to local network.
+      # Change to 0.0.0.0 only if you need LAN access to dashboards.
+      # [NETWORK-SEGMENTATION-TODO] In Azure, these services are not
+      # port-exposed at all — access is via Azure Private Link or VPN only.
+      - "127.0.0.1:9090:9090"
     networks:
       - mas-observability
     depends_on:
@@ -331,11 +391,30 @@ services:
     # the OTel collector pipeline. Azure: Management subnet. Logs never contain
     # raw content (enforced by _SafeJSONFormatter) but restrict port 3100 to
     # Management subnet inbound only via NSG.
+    #
+    # [SIEM-TODO] Loki is the local log aggregation layer only. In production,
+    # replace (or supplement) Loki with the Azure Sentinel OTel connector so
+    # that structured log events flow directly to the Sentinel Log Analytics
+    # workspace. Upgrade path:
+    #   1. In configs/otel-collector-config.yaml, add an azuremonitor exporter
+    #      alongside the loki exporter (both can run in parallel during the
+    #      transition). The azuremonitor exporter authenticates via the
+    #      collector container's Managed Identity — no credentials in config.
+    #   2. Route security-relevant log pipelines (injection, auth failures,
+    #      circuit-breaker triggers) to azuremonitor; keep loki for dev
+    #      dashboard traffic (Grafana Loki panels remain functional locally).
+    #   3. Once Sentinel pipelines are validated, retire the loki exporter
+    #      from the production collector config (keep it in local-dev profile).
+    #   See src/common/SIEM_INTEGRATION_GUIDE.md §OTel Connector Configuration.
     image: grafana/loki:2.9.7
     container_name: loki
     command: -config.file=/etc/loki/local-config.yaml
     ports:
-      - "3100:3100"
+      # Host-side localhost binding — not exposed to local network.
+      # Change to 0.0.0.0 only if you need LAN access to dashboards.
+      # [NETWORK-SEGMENTATION-TODO] In Azure, these services are not
+      # port-exposed at all — access is via Azure Private Link or VPN only.
+      - "127.0.0.1:3100:3100"
     volumes:
       - loki_data:/loki
     networks:
@@ -357,7 +436,11 @@ services:
       - grafana_data:/var/lib/grafana
       - ./configs/grafana/provisioning:/etc/grafana/provisioning:ro
     ports:
-      - "3000:3000"
+      # Host-side localhost binding — not exposed to local network.
+      # Change to 0.0.0.0 only if you need LAN access to dashboards.
+      # [NETWORK-SEGMENTATION-TODO] In Azure, these services are not
+      # port-exposed at all — access is via Azure Private Link or VPN only.
+      - "127.0.0.1:3000:3000"
     networks:
       - mas-observability
     depends_on:

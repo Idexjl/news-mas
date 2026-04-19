@@ -2,9 +2,9 @@ receivers:
   otlp:
     protocols:
       grpc:
-        endpoint: 0.0.0.0:4317
+        endpoint: "0.0.0.0:4317"
       http:
-        endpoint: 0.0.0.0:4318
+        endpoint: "0.0.0.0:4318"
 
 processors:
   batch:
@@ -13,6 +13,17 @@ processors:
   memory_limiter:
     check_interval: 1s
     limit_mib: 512
+  # Preserve service.name from the application resource; add deployment context.
+  # If the application sets SERVICE_NAME correctly the upsert is a no-op for
+  # service.name. deployment.environment is always stamped here as a fallback.
+  resource:
+    attributes:
+      - key: service.name
+        action: upsert
+        from_attribute: service.name
+      - key: deployment.environment
+        value: "local-dev"
+        action: upsert
 
 exporters:
   otlp/jaeger:
@@ -36,22 +47,39 @@ exporters:
     verbosity: basic
 
 service:
+  # [NETWORK-SEGMENTATION-TODO] In production (Azure Container Apps):
+  # The OTel collector runs as a sidecar container alongside each agent.
+  # It binds to localhost only — agents on the same pod communicate via
+  # loopback, so no cross-container networking is required. External
+  # scraping (Prometheus, Sentinel) uses the container group's internal
+  # DNS name, not 0.0.0.0. The localhost binding is the correct production
+  # pattern, not just a dev convenience.
+  #
+  # In local Docker Compose the collector is a standalone container, not a
+  # sidecar, so it must bind to 0.0.0.0 for cross-container connectivity.
+  # Host-side port exposure is restricted to 127.0.0.1 via the port bindings
+  # in docker-compose.yml — see the port comments there.
+  #
+  # The feature gate (component.UseLocalHostAsDefaultHost) is set via the
+  # --feature-gates CLI flag in docker-compose.yml; the service.feature_gates
+  # YAML key is not supported in otel-collector-contrib 0.99.0.
+
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
+      processors: [memory_limiter, resource, batch]
       exporters: [otlp/jaeger]
 
     metrics:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
+      processors: [memory_limiter, resource, batch]
       exporters: [prometheus]
 
     logs:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
+      processors: [memory_limiter, resource, batch]
       exporters: [loki]
 
   telemetry:
     metrics:
-      address: 0.0.0.0:8888
+      address: "0.0.0.0:8888"

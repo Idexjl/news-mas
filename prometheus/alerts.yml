@@ -1,0 +1,29 @@
+groups:
+  - name: mas_security
+    rules:
+      - alert: EgressInjectionDetected
+        expr: increase(news_mas_mas_egress_injection_detected_total[5m]) > 0
+        labels:
+          severity: high
+        annotations:
+          summary: "Prompt injection detected in fetched content"
+          description: "Check Jaeger for trace details. Do not log raw content."
+
+      - alert: TavilyAnomalousQueryLength
+        expr: >
+          histogram_quantile(0.95,
+            rate(news_mas_mas_egress_tavily_query_length_bucket[10m])
+          ) > 200
+        labels:
+          severity: medium
+        annotations:
+          summary: "Unusually long Tavily query detected"
+          description: "Possible prompt injection in search path"
+
+      - alert: TavilyHighCallVolume
+        expr: increase(news_mas_mas_egress_tavily_calls_total[1h]) > 50
+        labels:
+          severity: medium
+        annotations:
+          summary: "Unusual Tavily call volume"
+          description: "Possible runaway scheduler or loop"

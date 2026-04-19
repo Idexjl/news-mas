@@ -118,6 +118,19 @@ def mint_token(
     parameter and embed it as ``cnf: {jwk: ...}`` so the token is
     cryptographically bound to the minting agent's DPoP key from birth.
     See DPOP_IMPLEMENTATION_GUIDE.md §4.3.
+
+    [SIEM-TODO] The AAP token payload — especially aap_agent, aap_task,
+    aap_delegation, and aap_context — provides the full identity and task
+    context that Sentinel needs to enrich every downstream security event.
+    In production, log a structured mint event (token_id, agent_name,
+    task_id, data_sensitivity, delegation depth, run_id from context) so
+    Sentinel can correlate all activity in a pipeline run back to the
+    original mint event. The token_id from aap_audit becomes the correlation
+    key across Sentinel incidents — if an injection is detected downstream,
+    Sentinel can look up the token_id to find which orchestrator triggered
+    the run, what topic was being searched, and which agent chain was active.
+    data_sensitivity is especially important: Sentinel Analytics Rules can
+    apply stricter alerting thresholds when data_sensitivity == "PHI".
     """
     now = int(time.time())
     payload: dict[str, Any] = {
@@ -228,6 +241,24 @@ def validate_token(token: str, *, secret_key: str) -> dict[str, Any]:
     once DPoP is active end-to-end. Until then the shared-secret HS256
     check is the sole authentication mechanism.
     See DPOP_IMPLEMENTATION_GUIDE.md §4.1.
+
+    [SIEM-TODO] Failed validations here are among the highest-value signals
+    in the entire system for Sentinel:
+      - "Invalid token signature" → possible token forgery or key rotation
+        issue. If seen in bursts, may indicate a supply-chain compromise of
+        the shared secret. Sentinel alert: ≥3 signature failures in 5 minutes
+        from the same source IP → high-severity incident.
+      - "Token has expired" → may indicate a replay attempt with a captured
+        token, or a clock-skew issue between services (low severity alone, but
+        high severity if combined with an injection detection in the same run).
+      - "Missing required AAP sections" → structurally malformed token,
+        possibly from a non-standard client probing the API.
+      In production, wrap _decode_and_verify in a try/except and emit a
+      structured log event for each failure type:
+        {"event": "aap_token_validation_failure", "reason": exc.__class__.__name__,
+         "token_id": extracted_token_id_if_parseable, "agent_id": ...}
+      Sentinel can then join these events with network flows (from egress spans)
+      to detect patterns that neither signal alone would surface.
     """
     claims = _decode_and_verify(token, secret_key)
     _assert_aap_sections(claims)

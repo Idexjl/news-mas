@@ -15,7 +15,12 @@
       "Bash(python *)",
       "Bash(docker compose restart *)",
       "Bash(docker compose logs *)",
-      "Bash(docker compose *)"
+      "Bash(docker compose *)",
+      "Bash(docker-compose logs *)",
+      "Bash(docker-compose restart *)",
+      "Bash(.venv/Scripts/pip show *)",
+      "Bash(docker-compose down *)",
+      "Bash(docker-compose up *)"
     ]
   }
 }

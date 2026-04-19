@@ -37,7 +37,6 @@ dependencies = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
-env_files = [".env"]
 markers = ["integration: marks tests as integration tests requiring external services"]
 
 [tool.hatch.build.targets.wheel]
