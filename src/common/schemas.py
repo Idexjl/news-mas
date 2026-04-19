@@ -165,3 +165,31 @@ class RunState(BaseModel):
     digest: list[DigestEntry] = Field(default_factory=list)
     error: Optional[str] = None
     metrics: dict = Field(default_factory=dict)
+
+
+# ── Agent registry ────────────────────────────────────────────────────────────
+
+class WorkloadIdentityInfo(BaseModel):
+    """Workload identity state for one agent as reported in the registry."""
+    provider_type: str = Field(
+        description=(
+            "Active workload identity provider. "
+            "One of: local | azure-managed-identity | aws-sts | gcp-workload"
+        )
+    )
+    verified: bool = Field(
+        default=False,
+        description=(
+            "True once the provider has successfully obtained and validated "
+            "a platform-issued identity token at startup."
+        ),
+    )
+
+
+class AgentCard(BaseModel):
+    """Registry entry describing one agent's static and runtime metadata."""
+    agent_name: str
+    port: int
+    phase: int = Field(ge=1, le=2)
+    model: Optional[str] = None
+    workload_identity: WorkloadIdentityInfo

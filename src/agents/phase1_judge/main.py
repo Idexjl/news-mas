@@ -7,7 +7,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from src.common.observability import get_logger, setup_telemetry
 from src.common.schemas import Phase1JudgeInput, Phase1JudgeOutput
-from src.common.security import validate_shared_secret
+from src.auth.workload_identity import get_identity_provider
 # [DPOP-TODO] Replace SecurityHeaderMiddleware with DPoPAuthMiddleware once
 # Entra ID app registrations are provisioned. See DPOP_IMPLEMENTATION_GUIDE.md §4 (Phase 5).
 # from src.common.auth.middleware import DPoPAuthMiddleware
@@ -22,12 +22,16 @@ app = FastAPI(title="Phase 1 Judge Agent")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+_identity_provider = get_identity_provider()
+
 
 class SecurityHeaderMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if request.url.path not in ("/health",):
             try:
-                validate_shared_secret(request.headers.get("X-MAS-Secret", ""))
+                _identity_provider.validate_incoming_token(
+                    request.headers.get("X-MAS-Secret", "")
+                )
             except ValueError as exc:
                 return JSONResponse(status_code=401, content={"detail": str(exc)})
         return await call_next(request)

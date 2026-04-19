@@ -126,9 +126,17 @@ assigned. The model column for those agents is intentionally blank.
 ### Current state
 
 All agent-to-agent calls are HTTP/JSON. The orchestrators call agents directly over
-`POST /run`. Authentication uses a shared secret header (`X-MAS-Secret`), validated by
-`validate_shared_secret()` in `src/common/security.py`. This is intentionally minimal
-for development — it is not the production auth model.
+`POST /run`. Authentication is handled by `get_identity_provider()` in
+`src/auth/workload_identity.py`, which returns a `WorkloadIdentityProvider` for
+the environment. Each agent's `SecurityHeaderMiddleware` calls
+`provider.validate_incoming_token(X-MAS-Secret)` on every `/run` request.
+
+The active provider is selected by the `WORKLOAD_IDENTITY_PROVIDER` env var
+(default: `local`). Currently only `LocalDevIdentityProvider` is implemented —
+it validates the `X-MAS-Secret` header against `MAS_SECRET_KEY` using constant-time
+comparison. The three production providers (`azure-managed-identity`, `aws-sts`,
+`gcp-workload`) raise `NotImplementedError` with implementation guides pointing to
+`[WORKLOAD-IDENTITY-TODO]` comments in the source file.
 
 ### Why we chose HTTP + shared secret for now
 
@@ -465,7 +473,7 @@ without changing any repository or caller code.
 
 | Decision | Blocked on | Notes |
 |---|---|---|
-| **DPoP / Entra ID rollout** | Infrastructure: 8 Entra app registrations, `cryptography` + `PyJWT` packages | Full plan in `DPOP_IMPLEMENTATION_GUIDE.md`. All insertion points tagged `[DPOP-TODO]` in source. |
+| **DPoP / Entra ID rollout** | Infrastructure: 8 Entra app registrations, `cryptography` + `PyJWT` packages | Full plan in `DPOP_IMPLEMENTATION_GUIDE.md`. All insertion points tagged `[DPOP-TODO]` in source. Replace `LocalDevIdentityProvider` with `AzureManagedIdentityProvider` in Phase 2 — see `[WORKLOAD-IDENTITY-TODO]` in `src/auth/workload_identity.py`. |
 | **Option C retrieval** | Vector store + embedding pipeline + historical digest ingestion job | Deferred until core pipeline is stable and feedback data shows where quality degrades. |
 | **User feedback UI** | Product decision: web UI vs. email reply vs. API | Storage layer is built (§11); no frontend work started. |
 | **Offline eval framework** | Feedback data accumulation | Needs a labelled dataset from real runs before an eval harness is useful. |
