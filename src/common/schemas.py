@@ -6,6 +6,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from src.common.pipeline_errors import AgentResult  # noqa: F401 — re-exported for agent use
+
 
 # ── Shared primitives ─────────────────────────────────────────────────────────
 
@@ -39,9 +41,9 @@ class SearchWorkerInput(BaseModel):
     aap_token: Optional[str] = None  # validated when present; omit in dev/test
 
 
-class SearchWorkerOutput(BaseModel):
+class SearchWorkerOutput(AgentResult):
     run_id: str
-    articles: list[RawArticle]
+    articles: list[RawArticle] = Field(default_factory=list)
 
 
 # ── Heat Scorer ───────────────────────────────────────────────────────────────
@@ -51,9 +53,9 @@ class HeatScorerInput(BaseModel):
     articles: list[RawArticle]
 
 
-class HeatScorerOutput(BaseModel):
+class HeatScorerOutput(AgentResult):
     run_id: str
-    scored_articles: list[ScoredArticle]
+    scored_articles: list[ScoredArticle] = Field(default_factory=list)
 
 
 # ── Filter Agent ──────────────────────────────────────────────────────────────
@@ -64,9 +66,9 @@ class FilterAgentInput(BaseModel):
     min_heat_score: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
-class FilterAgentOutput(BaseModel):
+class FilterAgentOutput(AgentResult):
     run_id: str
-    filtered_articles: list[ScoredArticle]
+    filtered_articles: list[ScoredArticle] = Field(default_factory=list)
     dropped_count: int = 0
 
 
@@ -78,9 +80,9 @@ class SelectorInput(BaseModel):
     max_select: int = Field(default=10, ge=1, le=50)
 
 
-class SelectorOutput(BaseModel):
+class SelectorOutput(AgentResult):
     run_id: str
-    selected_articles: list[ScoredArticle]
+    selected_articles: list[ScoredArticle] = Field(default_factory=list)
 
 
 # ── Phase 1 Judge ─────────────────────────────────────────────────────────────
@@ -90,9 +92,9 @@ class Phase1JudgeInput(BaseModel):
     selected_articles: list[ScoredArticle]
 
 
-class Phase1JudgeOutput(BaseModel):
+class Phase1JudgeOutput(AgentResult):
     run_id: str
-    judged_articles: list[JudgedArticle]
+    judged_articles: list[JudgedArticle] = Field(default_factory=list)
 
 
 # ── Summarizer ────────────────────────────────────────────────────────────────
@@ -102,10 +104,10 @@ class SummarizerInput(BaseModel):
     article: RawArticle
 
 
-class SummarizerOutput(BaseModel):
+class SummarizerOutput(AgentResult):
     run_id: str
-    summary: str
-    key_points: list[str]
+    summary: str = ""
+    key_points: list[str] = Field(default_factory=list)
 
 
 # ── Reviewer ──────────────────────────────────────────────────────────────────
@@ -117,9 +119,9 @@ class ReviewerInput(BaseModel):
     key_points: list[str]
 
 
-class ReviewerOutput(BaseModel):
+class ReviewerOutput(AgentResult):
     run_id: str
-    approved: bool
+    approved: bool = False
     revised_summary: Optional[str] = None
     feedback: str = ""
 
@@ -132,10 +134,10 @@ class RelevanceGateInput(BaseModel):
     summary: str
 
 
-class RelevanceGateOutput(BaseModel):
+class RelevanceGateOutput(AgentResult):
     run_id: str
-    is_relevant: bool
-    confidence: float = Field(ge=0.0, le=1.0)
+    is_relevant: bool = False
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     reason: str = ""
 
 

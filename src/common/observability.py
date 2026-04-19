@@ -14,6 +14,7 @@ from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.trace import StatusCode
 
 # Keys whose values must never appear in structured logs
 _BLOCKED_LOG_KEYS = frozenset(
@@ -166,6 +167,56 @@ def log_with_run_id(logger: logging.Logger, level: int, msg: str, run_id: str, *
     """Convenience wrapper that threads run_id into every log record."""
     extra = {"run_id": run_id, **kwargs}
     logger.log(level, msg, extra=extra)
+
+
+def log_pipeline_error(logger: logging.Logger, error: Any) -> None:
+    """
+    Emit a structured log record for a PipelineError.
+
+    Only metadata fields are logged (error_code, severity, agent_id, run_id,
+    topic_id, retry_hint, and safe context keys). The error.message field is
+    included because it must describe the structural problem, not content.
+    Context values whose keys appear in _BLOCKED_LOG_KEYS are stripped.
+
+    Never call this with error.context populated with PHI or article content.
+    """
+    safe_context = {
+        k: v
+        for k, v in error.context.items()
+        if k.lower() not in _BLOCKED_LOG_KEYS
+    }
+    logger.error(
+        "pipeline_error",
+        extra={
+            "error_code": error.error_code,
+            "severity": str(error.severity),
+            "agent_id": error.agent_id,
+            "run_id": error.run_id,
+            "topic_id": error.topic_id,
+            "retry_hint": error.retry_hint,
+            **safe_context,
+        },
+    )
+
+
+def record_span_error(span: Any, error: Any) -> None:
+    """
+    Mark an OTel span as ERROR and attach safe pipeline error attributes.
+
+    Sets span status to ERROR with a generic description (not the
+    error.message, which may reference content structure).
+
+    Attributes attached:
+      error.code     — the error_code constant (e.g. "NO_RESULTS")
+      error.severity — severity string (e.g. "SKIP", "FATAL")
+
+    Never attached:
+      error.message  — could contain structural content references
+      error.context  — may contain metadata whose keys overlap with content
+    """
+    span.set_status(StatusCode.ERROR, description=error.error_code)
+    span.set_attribute("error.code", error.error_code)
+    span.set_attribute("error.severity", str(error.severity))
 
 
 def configure_langsmith() -> bool:
