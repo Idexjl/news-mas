@@ -1,6 +1,51 @@
+# Network topology reflects trust tiers.
+# Worker agents cannot reach identity tier by design.
+# Maps to Azure subnet + NSG rules in production.
+# See ARCHITECTURE.md for full network segmentation design.
+
+# ── Networks ──────────────────────────────────────────────────────────────────
+# Three internal networks (no external routing) and one external observability
+# plane. internal: true means containers on those networks cannot reach the
+# Docker host's default gateway — equivalent to a private Azure subnet with no
+# internet route table entry and an NSG that blocks 0.0.0.0/0 outbound.
+
 networks:
-  observability:
+  mas-identity:
     driver: bridge
+    internal: true
+    # [NETWORK-SEGMENTATION-TODO] Azure equivalent: dedicated Identity subnet
+    # (e.g. 10.0.1.0/24) with NSG rules that allow inbound only from the
+    # Orchestration subnet on port 8000 and block all other inbound/outbound.
+    # Services here hold signing keys and registry metadata — isolating this
+    # subnet limits blast radius if an orchestrator or worker is compromised.
+
+  mas-orchestration:
+    driver: bridge
+    internal: true
+    # [NETWORK-SEGMENTATION-TODO] Azure equivalent: Orchestration subnet
+    # (e.g. 10.0.2.0/24) with NSG rules allowing inbound from the Identity
+    # subnet on the token-service port and outbound to the Compute subnet on
+    # agent ports 8001-8008 only. Orchestrators must be able to call agents
+    # but must never be reachable from the Compute subnet.
+
+  mas-compute:
+    driver: bridge
+    internal: true
+    # [NETWORK-SEGMENTATION-TODO] Azure equivalent: Compute subnet
+    # (e.g. 10.0.3.0/24). NSG inbound: allow only from Orchestration subnet
+    # on ports 8001-8008. NSG outbound: allow only to Observability subnet
+    # (OTel collector on 4317/4318) and Tavily/Anthropic/Ollama external
+    # endpoints. Worker agents are explicitly NOT on mas-identity — they can
+    # never directly reach the token service or agent registry.
+
+  mas-observability:
+    driver: bridge
+    # External (no internal: true) so that Grafana, Jaeger, and Prometheus UIs
+    # are reachable from the host browser on their published ports.
+    # [NETWORK-SEGMENTATION-TODO] Azure equivalent: Management subnet
+    # (e.g. 10.0.4.0/24) with NSG rules allowing inbound 3000/9090/16686 from
+    # operator IP ranges only. All services join this network solely to push
+    # telemetry to the OTel collector — not for inter-service communication.
 
 volumes:
   prometheus_data: {}
@@ -8,8 +53,226 @@ volumes:
   loki_data: {}
 
 services:
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # IDENTITY TIER — mas-identity + mas-observability
+  # auth-server and registry never start on default profile; they require
+  # `--profile agents` once their Docker images are built.
+  # ════════════════════════════════════════════════════════════════════════════
+
+  auth-server:
+    # [NETWORK-SEGMENTATION-TODO] This service is the trust anchor for the
+    # entire system (AAP token minting, DPoP key distribution once implemented).
+    # It must only be reachable by orchestrators, never by worker agents.
+    # Azure equivalent: deploy behind an internal load balancer in the Identity
+    # subnet; NSG allows inbound only from the Orchestration subnet IP range.
+    profiles: [agents]
+    build:
+      context: .
+      dockerfile: Dockerfile.auth-server
+    container_name: auth-server
+    env_file: .env
+    ports:
+      - "8000:8000"
+    networks:
+      - mas-identity
+      - mas-observability
+
+  registry:
+    # [NETWORK-SEGMENTATION-TODO] Agent registry holds service discovery
+    # metadata (ports, capabilities, health endpoints). Isolating it on
+    # mas-identity means a compromised worker cannot enumerate other services.
+    # Azure equivalent: Private Endpoint in the Identity subnet; no public IP.
+    profiles: [agents]
+    build:
+      context: .
+      dockerfile: Dockerfile.registry
+    container_name: registry
+    env_file: .env
+    networks:
+      - mas-identity
+      - mas-observability
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # ORCHESTRATION TIER — mas-identity + mas-orchestration + mas-observability
+  # Orchestrators need to call agents (mas-orchestration → mas-compute) and
+  # acquire AAP tokens (mas-orchestration → mas-identity). They are NOT on
+  # mas-compute, so agents cannot initiate connections back to orchestrators.
+  # ════════════════════════════════════════════════════════════════════════════
+
+  orchestrator-phase1:
+    # [NETWORK-SEGMENTATION-TODO] Phase 1 graph fans out to SearchWorker,
+    # HeatScorer, FilterAgent, Selector, and Phase1Judge. It must reach both
+    # the identity tier (token exchange) and the compute tier (agent /run calls).
+    # Azure equivalent: App Service or AKS pod in Orchestration subnet with a
+    # route table entry to Compute subnet but NOT to public internet on agent
+    # ports.
+    profiles: [agents]
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+      args:
+        PHASE: "1"
+    container_name: orchestrator-phase1
+    env_file: .env
+    networks:
+      - mas-identity
+      - mas-orchestration
+      - mas-observability
+
+  orchestrator-phase2:
+    # [NETWORK-SEGMENTATION-TODO] Phase 2 graph calls Summarizer, Reviewer,
+    # and RelevanceGate. Same trust requirements as Phase 1 — needs identity
+    # access for token exchange and compute access for agent dispatch.
+    profiles: [agents]
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+      args:
+        PHASE: "2"
+    container_name: orchestrator-phase2
+    env_file: .env
+    networks:
+      - mas-identity
+      - mas-orchestration
+      - mas-observability
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # COMPUTE TIER — mas-compute + mas-observability ONLY
+  # Worker agents are explicitly NOT on mas-identity. A compromised worker
+  # cannot reach the token service or registry under any circumstance.
+  # ════════════════════════════════════════════════════════════════════════════
+
+  search-worker:
+    # [NETWORK-SEGMENTATION-TODO] Makes outbound calls to Tavily search API
+    # (external). Azure: Compute subnet with a NAT gateway for outbound
+    # internet. NSG: allow outbound 443 to Tavily IP ranges only (use ASG).
+    # No inbound except from Orchestration subnet on port 8001.
+    profiles: [agents]
+    build: { context: ., dockerfile: Dockerfile.agent, args: { AGENT: search_worker } }
+    container_name: search-worker
+    env_file: .env
+    ports:
+      - "8001:8001"
+    networks:
+      - mas-compute
+      - mas-observability
+
+  heat-scorer:
+    # [NETWORK-SEGMENTATION-TODO] Calls local Ollama (Gemma 4). In Azure this
+    # means an outbound route to the Ollama ACI/VM in the same Compute subnet —
+    # no cross-subnet hop needed. NSG: allow inbound 8002 from Orchestration
+    # subnet only.
+    profiles: [agents]
+    build: { context: ., dockerfile: Dockerfile.agent, args: { AGENT: heat_scorer } }
+    container_name: heat-scorer
+    env_file: .env
+    ports:
+      - "8002:8002"
+    networks:
+      - mas-compute
+      - mas-observability
+
+  filter-agent:
+    # [NETWORK-SEGMENTATION-TODO] Purely deterministic; no external calls.
+    # Azure: Compute subnet, NSG inbound 8003 from Orchestration subnet only,
+    # outbound deny-all except OTel collector.
+    profiles: [agents]
+    build: { context: ., dockerfile: Dockerfile.agent, args: { AGENT: filter_agent } }
+    container_name: filter-agent
+    env_file: .env
+    ports:
+      - "8003:8003"
+    networks:
+      - mas-compute
+      - mas-observability
+
+  selector:
+    # [NETWORK-SEGMENTATION-TODO] Purely deterministic ranking. Same isolation
+    # profile as filter-agent. Azure NSG: inbound 8004 from Orchestration only.
+    profiles: [agents]
+    build: { context: ., dockerfile: Dockerfile.agent, args: { AGENT: selector } }
+    container_name: selector
+    env_file: .env
+    ports:
+      - "8004:8004"
+    networks:
+      - mas-compute
+      - mas-observability
+
+  phase1-judge:
+    # [NETWORK-SEGMENTATION-TODO] Calls local Ollama. Same profile as
+    # heat-scorer. Azure: Compute subnet, inbound 8005 from Orchestration only.
+    profiles: [agents]
+    build: { context: ., dockerfile: Dockerfile.agent, args: { AGENT: phase1_judge } }
+    container_name: phase1-judge
+    env_file: .env
+    ports:
+      - "8005:8005"
+    networks:
+      - mas-compute
+      - mas-observability
+
+  summarizer:
+    # [NETWORK-SEGMENTATION-TODO] Calls Anthropic API (external HTTPS).
+    # Azure: Compute subnet + NAT gateway, outbound 443 to Anthropic IP ranges.
+    # This is the highest data-sensitivity agent — PII scrubbing must complete
+    # before content reaches this service. NSG: inbound 8006 from Orchestration.
+    profiles: [agents]
+    build: { context: ., dockerfile: Dockerfile.agent, args: { AGENT: summarizer } }
+    container_name: summarizer
+    env_file: .env
+    ports:
+      - "8006:8006"
+    networks:
+      - mas-compute
+      - mas-observability
+
+  reviewer:
+    # [NETWORK-SEGMENTATION-TODO] Calls Anthropic API. Same external egress
+    # requirements as summarizer. In the retry loop it exchanges tokens with
+    # the orchestrator — that exchange stays within mas-orchestration, not
+    # mas-identity. NSG: inbound 8007 from Orchestration subnet only.
+    profiles: [agents]
+    build: { context: ., dockerfile: Dockerfile.agent, args: { AGENT: reviewer } }
+    container_name: reviewer
+    env_file: .env
+    ports:
+      - "8007:8007"
+    networks:
+      - mas-compute
+      - mas-observability
+
+  relevance-gate:
+    # [NETWORK-SEGMENTATION-TODO] Calls local Ollama. Gates final digest
+    # inclusion — a false positive here leaks low-quality content to users, not
+    # a security issue, but isolation is still required to prevent lateral
+    # movement if the model inference endpoint is compromised.
+    # Azure NSG: inbound 8008 from Orchestration subnet only.
+    profiles: [agents]
+    build: { context: ., dockerfile: Dockerfile.agent, args: { AGENT: relevance_gate } }
+    container_name: relevance-gate
+    env_file: .env
+    ports:
+      - "8008:8008"
+    networks:
+      - mas-compute
+      - mas-observability
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # OBSERVABILITY TIER — mas-observability only
+  # No internal: true — UIs must be reachable from the host browser.
+  # These services receive telemetry from all tiers but cannot initiate
+  # connections into identity, orchestration, or compute networks.
+  # ════════════════════════════════════════════════════════════════════════════
+
   # ── OpenTelemetry Collector ──────────────────────────────────────────────────
   otel-collector:
+    # [NETWORK-SEGMENTATION-TODO] Receives OTLP spans from all agents and
+    # orchestrators. All services push telemetry to this collector — it is the
+    # only cross-tier communication allowed on mas-observability. Azure: deploy
+    # in Management subnet; agents reach it via Private Endpoint to avoid
+    # telemetry traversing a public load balancer.
     image: otel/opentelemetry-collector-contrib:0.99.0
     container_name: otel-collector
     command: ["--config=/etc/otel-collector-config.yaml"]
@@ -21,13 +284,16 @@ services:
       - "8888:8888"    # Collector metrics (Prometheus scrape target)
       - "8889:8889"    # Prometheus exporter (app metrics)
     networks:
-      - observability
+      - mas-observability
     depends_on:
       - jaeger
       - loki
 
   # ── Jaeger (distributed tracing) ────────────────────────────────────────────
   jaeger:
+    # [NETWORK-SEGMENTATION-TODO] Trace storage and UI. Azure: deploy in
+    # Management subnet behind an internal load balancer; expose UI port 16686
+    # via Azure Bastion or VPN only — never to public internet.
     image: jaegertracing/all-in-one:1.57
     container_name: jaeger
     environment:
@@ -37,10 +303,13 @@ services:
       - "14250:14250"  # gRPC (collector → Jaeger)
       - "14268:14268"  # HTTP collector
     networks:
-      - observability
+      - mas-observability
 
   # ── Prometheus (metrics) ─────────────────────────────────────────────────────
   prometheus:
+    # [NETWORK-SEGMENTATION-TODO] Scrapes otel-collector metrics endpoint.
+    # Azure: Management subnet, scrape targets resolved via private DNS.
+    # Restrict UI port 9090 to operator IP ranges via NSG.
     image: prom/prometheus:v2.51.2
     container_name: prometheus
     command:
@@ -52,12 +321,16 @@ services:
     ports:
       - "9090:9090"
     networks:
-      - observability
+      - mas-observability
     depends_on:
       - otel-collector
 
   # ── Loki (log aggregation) ───────────────────────────────────────────────────
   loki:
+    # [NETWORK-SEGMENTATION-TODO] Receives structured logs from all agents via
+    # the OTel collector pipeline. Azure: Management subnet. Logs never contain
+    # raw content (enforced by _SafeJSONFormatter) but restrict port 3100 to
+    # Management subnet inbound only via NSG.
     image: grafana/loki:2.9.7
     container_name: loki
     command: -config.file=/etc/loki/local-config.yaml
@@ -66,10 +339,14 @@ services:
     volumes:
       - loki_data:/loki
     networks:
-      - observability
+      - mas-observability
 
   # ── Grafana (dashboards) ─────────────────────────────────────────────────────
   grafana:
+    # [NETWORK-SEGMENTATION-TODO] Unified dashboard surface for all tiers.
+    # Azure: Management subnet, port 3000 exposed via Azure Application Gateway
+    # with Entra ID authentication — Grafana UI should never be accessible
+    # without operator credentials even on internal networks.
     image: grafana/grafana:10.4.2
     container_name: grafana
     environment:
@@ -82,7 +359,7 @@ services:
     ports:
       - "3000:3000"
     networks:
-      - observability
+      - mas-observability
     depends_on:
       - prometheus
       - loki

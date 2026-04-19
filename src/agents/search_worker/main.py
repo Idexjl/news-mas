@@ -8,7 +8,8 @@ from slowapi.util import get_remote_address
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from src.common import agent_registry
-from src.common.observability import configure_langsmith, get_logger, setup_telemetry
+from src.common.agent_bootstrap import bootstrap_agent
+from src.common.observability import configure_langsmith, get_logger, get_tracer, setup_telemetry
 from src.common.schemas import SearchWorkerInput, SearchWorkerOutput
 from src.auth.workload_identity import get_identity_provider
 # [DPOP-TODO] Replace SecurityHeaderMiddleware with DPoPAuthMiddleware once
@@ -53,12 +54,29 @@ app.add_middleware(SecurityHeaderMiddleware)
 
 @app.on_event("startup")
 async def startup() -> None:
-    agent_registry.register(
-        "search-worker-01",
-        capabilities=["search.web"],
-        endpoint=os.getenv("SERVICE_URL", "http://localhost:8001"),
-    )
-    logger.info("agent_registered", extra={"agent_id": "search-worker-01"})
+    tracer = get_tracer("search-worker")
+    with tracer.start_as_current_span("agent.bootstrap") as span:
+        registry_url = os.getenv("REGISTRY_URL", "http://localhost:8000")
+        agent_id = os.getenv("AGENT_ID", "search-worker")
+        try:
+            config = await bootstrap_agent(registry_url, _identity_provider, agent_id)
+            app.state.agent_config = config
+            span.set_attribute("agent.id", config.agent_id)
+            span.set_attribute("agent.model_provider", config.model_provider)
+            span.set_attribute("agent.model_id", config.model_id)
+            agent_registry.register(
+                config.agent_id,
+                capabilities=config.capabilities,
+                endpoint=os.getenv("SERVICE_URL", "http://localhost:8001"),
+            )
+            logger.info("agent_bootstrapped", extra={
+                "agent_id": config.agent_id,
+                "model_provider": config.model_provider,
+                "network_tier": config.network_tier,
+            })
+        except Exception as exc:
+            logger.warning("bootstrap_failed", extra={"error": str(exc)})
+            app.state.agent_config = None
 
 
 @app.get("/health")

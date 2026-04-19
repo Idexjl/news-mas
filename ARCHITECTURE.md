@@ -15,7 +15,7 @@
 5. [AAP Auth Layer](#5-aap-auth-layer)
 6. [Model Split](#6-model-split)
 7. [PII/PHI Handling](#7-piiphi-handling)
-8. [Observability Stack](#8-observability-stack)
+8. [Observability Stack and Network Segmentation](#8-observability-stack)
 9. [Context Window Strategy](#9-context-window-strategy)
 10. [Prompt Versioning](#10-prompt-versioning)
 11. [Feedback Data Model](#11-feedback-data-model)
@@ -97,20 +97,43 @@ easier to reason about and test independently.
 All agents expose `GET /health` (no auth) and `POST /run` (auth required). Rate limit:
 30 requests/minute via `slowapi`.
 
-| Agent | Port | Phase | Model | Purpose |
-|---|---|---|---|---|
-| `search_worker` | 8001 | 1 | — | Fetch raw articles from Tavily for each topic |
-| `heat_scorer` | 8002 | 1 | Gemma 4 (local) | Score articles 0.0–1.0 on timeliness × impact × relevance |
-| `filter_agent` | 8003 | 1 | — | Drop articles below `min_heat_score` threshold |
-| `selector` | 8004 | 1 | — | Pick top-K articles by heat score |
-| `phase1_judge` | 8005 | 1 | Gemma 4 (local) | Holistic approve/reject over the shortlist |
-| `summarizer` | 8006 | 2 | Claude Sonnet | Generate summary + key points for one article |
-| `reviewer` | 8007 | 2 | Claude Sonnet | Evaluate summary quality; approve or request revision |
-| `relevance_gate` | 8008 | 2 | Gemma 4 (local) | Score digest relevance confidence; gate final inclusion |
+| Agent | Port | Phase | Model provider | Model ID | Purpose |
+|---|---|---|---|---|---|
+| `registry` | 8000 | — | — | — | Stores and serves AgentConfig; seeds defaults on startup |
+| `search_worker` | 8001 | 1 | tavily | — | Fetch raw articles from Tavily for each topic |
+| `heat_scorer` | 8002 | 1 | ollama | `gemma4:e4b` | Score articles 0.0–1.0 on timeliness × impact × relevance |
+| `filter_agent` | 8003 | 1 | none | — | Drop articles below `min_heat_score` threshold |
+| `selector` | 8004 | 1 | none | — | Pick top-K articles by heat score |
+| `phase1_judge` | 8005 | 1 | ollama | `gemma4:e4b` | Holistic approve/reject over the shortlist |
+| `summarizer` | 8006 | 2 | anthropic | `claude-sonnet-4-6` | Generate summary + key points for one article |
+| `reviewer` | 8007 | 2 | anthropic | `claude-sonnet-4-6` | Evaluate summary quality; approve or request revision |
+| `relevance_gate` | 8008 | 2 | ollama | `gemma4:e4b` | Score digest relevance confidence; gate final inclusion |
 
 `search_worker`, `filter_agent`, and `selector` are deterministic or near-deterministic
-(threshold comparisons, ranking). They do not require LLM calls and have no model
-assigned. The model column for those agents is intentionally blank.
+(threshold comparisons, ranking). They do not require LLM calls.
+
+**Model assignment is stored in the registry, not hardcoded.** The registry seeds default
+`AgentConfig` records on startup (`src/registry/registry_server.py`). Agents fetch their
+own config at startup via `bootstrap_agent()` (`src/common/agent_bootstrap.py`). The
+`MODEL_OVERRIDE` env var remains available for global model switching during development.
+
+### Agent bootstrap sequence
+
+Every agent runs this sequence on startup (FastAPI `@on_event("startup")`):
+
+```
+1. Read REGISTRY_URL + AGENT_ID from environment
+2. Call bootstrap_agent(registry_url, identity_provider, agent_id)
+   → GET /agents/{agent_id}/config on the registry (auth: X-MAS-Secret)
+   → Returns AgentConfig
+3. Store AgentConfig on app.state.agent_config
+4. Register with local in-memory agent_registry (capabilities from AgentConfig)
+5. Emit OTel span "agent.bootstrap" with agent_id, model_provider, model_id
+```
+
+If the registry is unreachable at startup, the agent logs a warning and starts in
+degraded mode (`app.state.agent_config = None`). This is acceptable for local dev
+where the registry may not be running; it would not be acceptable in production.
 
 **Shared across all agents:**
 - Pydantic v2 schemas (`src/common/schemas.py`)
@@ -324,7 +347,39 @@ content that triggered them may not.
 | Loki | Structured log aggregation | internal |
 | Grafana | Unified dashboards (traces + metrics + logs) | http://localhost:3000 |
 
-Start the stack: `docker compose up -d`. Configs are in `configs/`.
+Start the observability stack: `docker compose up -d`. Configs are in `configs/`.
+Start the full agent stack: `docker compose --profile agents up -d` (requires agent images to be built first — Dockerfiles are not yet committed; see §12).
+
+### Network segmentation
+
+`docker-compose.yml` defines four Docker networks that reflect the trust tiers of the system. They map directly to Azure subnets + NSG rules for the production deployment.
+
+```
+mas-identity       (internal: true)  ← auth-server, registry
+       │
+mas-orchestration  (internal: true)  ← orchestrators (both phases)
+       │
+mas-compute        (internal: true)  ← all eight worker agents
+       │
+mas-observability  (external)        ← OTel, Jaeger, Prometheus, Grafana, Loki
+```
+
+**Trust rules enforced by network membership:**
+
+| Source tier | Can reach | Cannot reach |
+|---|---|---|
+| Worker agents (mas-compute) | mas-observability (OTel push) | mas-identity, mas-orchestration |
+| Orchestrators | mas-identity (token exchange), mas-compute (agent dispatch), mas-observability | — |
+| auth-server / registry | mas-observability | mas-orchestration, mas-compute |
+| Observability services | — (receive only) | mas-identity, mas-orchestration, mas-compute |
+
+`internal: true` means Docker removes the default gateway from those networks — containers cannot reach the Docker host's external interface even if they try. In production on Azure this maps to:
+
+- A dedicated subnet per tier with no internet route table entry
+- NSG inbound rules that allow only the specific source subnet + port combinations listed in the `[NETWORK-SEGMENTATION-TODO]` comments on each service in `docker-compose.yml`
+- No NSG rule permits worker agents (Compute subnet) to reach the Identity subnet under any condition
+
+**Why workers are never on mas-identity:** Worker agents process external content (Tavily results, article bodies) and call external APIs (Anthropic, Ollama). They have the largest attack surface. Excluding them from `mas-identity` means that a prompt-injection attack or supply-chain compromise in a worker agent cannot reach the token service or agent registry — the network enforces the boundary regardless of application-layer controls.
 
 Each agent calls `setup_telemetry(service_name)` on startup
 (`src/common/observability.py`). This registers an `OTLPSpanExporter` pointed at
@@ -515,6 +570,9 @@ without changing any repository or caller code.
 | **AAP → DPoP token binding** | Same as DPoP rollout | Three `[DPOP-TODO]` points in `src/auth/token_service.py` mark the exact swap. HS256 shared-secret is interim only. |
 | **CAE (Continuous Access Evaluation)** | Entra CAE subscription + resource server event handler | Closes the introspection gap — tokens can be invalidated mid-lifetime. See §4 and `DPOP_IMPLEMENTATION_GUIDE.md §3.6`. Implement after DPoP Phase 5 is complete. |
 | **Feedback-driven threshold tuning** | `candidate_override` and `topic_relevance` data | `HeatScorer` and `RelevanceGate` thresholds are currently static constants; they will become learned from feedback. |
+| **Agent + orchestrator Dockerfiles** | Implementation of individual agents | Network segmentation is fully defined in `docker-compose.yml` with `profiles: [agents]`. Services start with `docker compose --profile agents up -d` once `Dockerfile.agent`, `Dockerfile.orchestrator`, `Dockerfile.auth-server`, and `Dockerfile.registry` are committed. Each service's `[NETWORK-SEGMENTATION-TODO]` comment documents its Azure NSG equivalent. |
+| **Registry persistence** | FernetStorage migration | `src/registry/card_store.py` currently uses an in-memory dict. For production, swap for a `FernetStorage`-backed implementation using the same `save/get/update/list` interface. The interface is intentionally identical to `src/common/storage.py` repositories. |
+| **Registry auth on startup degradation** | Product decision | Agents start in degraded mode if the registry is unreachable. In production this should be a hard failure. Implement a `BOOTSTRAP_REQUIRED=true` env flag that makes startup abort if `bootstrap_agent()` raises. |
 
 ---
 

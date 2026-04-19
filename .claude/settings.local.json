@@ -14,7 +14,8 @@
       "Bash(python -m pytest tests/ --co -q)",
       "Bash(python *)",
       "Bash(docker compose restart *)",
-      "Bash(docker compose logs *)"
+      "Bash(docker compose logs *)",
+      "Bash(docker compose *)"
     ]
   }
 }

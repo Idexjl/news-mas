@@ -30,12 +30,15 @@ dependencies = [
     "cryptography",
     "pytest",
     "pytest-asyncio",
+    "pytest-dotenv",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+env_files = [".env"]
+markers = ["integration: marks tests as integration tests requiring external services"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
