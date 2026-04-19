@@ -332,12 +332,47 @@ Each agent calls `setup_telemetry(service_name)` on startup
 `BatchSpanProcessor`. The `service.name` resource attribute is set to the agent name,
 so traces in Jaeger are grouped per agent.
 
-### LangSmith for LLM traces
+### Observability split — LangSmith vs OTel/Jaeger/Grafana
 
-LLM calls are traced separately via LangSmith (`LANGSMITH_API_KEY`,
-`LANGSMITH_PROJECT=news-mas`). LangSmith captures prompt/completion pairs, token counts,
-and latency per LLM call. Every trace is tagged with the prompt version (see §10) so
-prompt changes are visible in the LangSmith UI without cross-referencing the codebase.
+The two stacks are complementary and run simultaneously:
+
+| Stack | Scope | What it captures |
+|---|---|---|
+| OTel → Jaeger / Grafana | Infrastructure | HTTP latency, span trees across agents, error rates, rate-limit hits, system metrics |
+| LangSmith | LLM calls | Prompt/completion pairs, token counts, per-call latency, prompt version, eval scores |
+
+Neither replaces the other. Jaeger shows you why a request was slow across agent hops;
+LangSmith shows you what the model received and produced and how quality changed between
+prompt versions.
+
+### LangSmith configuration
+
+`configure_langsmith()` in `src/common/observability.py` maps `LANGSMITH_API_KEY` and
+`LANGSMITH_PROJECT` to the `LANGCHAIN_*` env vars that the LangChain/LangSmith SDK reads
+at call time. It is called from every LLM-agent `main.py` at startup alongside
+`setup_telemetry()`. If `LANGSMITH_API_KEY` is absent the function logs a warning and
+returns `False` — agents start normally with tracing disabled (offline dev).
+
+### LLM run tagging
+
+Every LLM call passes `config=make_run_config(...)` (from `src/common/prompt_loader.py`).
+This attaches four tags to each LangSmith run for filtering:
+
+| Tag / metadata key | Value |
+|---|---|
+| `agent:{name}` | Agent that made the call |
+| `prompt:{version}` | Exact prompt version file (e.g. `v1.0`) |
+| `run:{run_id}` | Pipeline run UUID — correlates with OTel traces and `RunRepository` |
+| `topic:{topic_id}` | Topic being processed (when available) |
+
+### LangSmith as the offline eval framework
+
+LangSmith Datasets + Evaluators are the planned path for the offline eval framework
+(currently deferred in §12). Labelled examples from real runs are added to a LangSmith
+Dataset; evaluators run against new prompt versions on the same inputs. Because every
+run is already tagged with `prompt_version` and `run_id`, building a labelled dataset
+requires only selecting runs in the LangSmith UI and exporting them — no separate
+ingestion job.
 
 ---
 
@@ -476,7 +511,7 @@ without changing any repository or caller code.
 | **DPoP / Entra ID rollout** | Infrastructure: 8 Entra app registrations, `cryptography` + `PyJWT` packages | Full plan in `DPOP_IMPLEMENTATION_GUIDE.md`. All insertion points tagged `[DPOP-TODO]` in source. Replace `LocalDevIdentityProvider` with `AzureManagedIdentityProvider` in Phase 2 — see `[WORKLOAD-IDENTITY-TODO]` in `src/auth/workload_identity.py`. |
 | **Option C retrieval** | Vector store + embedding pipeline + historical digest ingestion job | Deferred until core pipeline is stable and feedback data shows where quality degrades. |
 | **User feedback UI** | Product decision: web UI vs. email reply vs. API | Storage layer is built (§11); no frontend work started. |
-| **Offline eval framework** | Feedback data accumulation | Needs a labelled dataset from real runs before an eval harness is useful. |
+| **Offline eval framework** | Feedback data accumulation | Planned as LangSmith Datasets + Evaluators (see §8). Every run is already tagged with `prompt_version` and `run_id`; building a labelled dataset requires only selecting and exporting runs from the LangSmith UI. Gated on accumulating enough real-run data. |
 | **AAP → DPoP token binding** | Same as DPoP rollout | Three `[DPOP-TODO]` points in `src/auth/token_service.py` mark the exact swap. HS256 shared-secret is interim only. |
 | **CAE (Continuous Access Evaluation)** | Entra CAE subscription + resource server event handler | Closes the introspection gap — tokens can be invalidated mid-lifetime. See §4 and `DPOP_IMPLEMENTATION_GUIDE.md §3.6`. Implement after DPoP Phase 5 is complete. |
 | **Feedback-driven threshold tuning** | `candidate_override` and `topic_relevance` data | `HeatScorer` and `RelevanceGate` thresholds are currently static constants; they will become learned from feedback. |

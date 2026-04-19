@@ -26,10 +26,11 @@ exporters:
 
   loki:
     endpoint: http://loki:3100/loki/api/v1/push
-    labels:
-      resource:
-        service.name: "service_name"
-        service.version: "service_version"
+    default_labels_enabled:
+      exporter: false
+      job: true       # maps service.name → job label in Loki
+      instance: true  # maps service.instance.id → instance label
+      level: true     # maps log severity → level label
 
   debug:
     verbosity: basic

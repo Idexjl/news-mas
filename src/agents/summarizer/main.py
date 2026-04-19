@@ -5,7 +5,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from src.common.observability import get_logger, setup_telemetry
+from src.common.observability import configure_langsmith, get_logger, setup_telemetry
 from src.common.schemas import SummarizerInput, SummarizerOutput
 from src.auth.workload_identity import get_identity_provider
 # [DPOP-TODO] Replace SecurityHeaderMiddleware with DPoPAuthMiddleware once
@@ -15,6 +15,7 @@ from src.auth.workload_identity import get_identity_provider
 from .agent import run_agent
 
 setup_telemetry("summarizer")
+configure_langsmith()
 logger = get_logger(__name__)
 
 limiter = Limiter(key_func=get_remote_address)

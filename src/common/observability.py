@@ -103,3 +103,34 @@ def log_with_run_id(logger: logging.Logger, level: int, msg: str, run_id: str, *
     """Convenience wrapper that threads run_id into every log record."""
     extra = {"run_id": run_id, **kwargs}
     logger.log(level, msg, extra=extra)
+
+
+def configure_langsmith() -> bool:
+    """
+    Configure LangSmith tracing by mapping LANGSMITH_* env vars to the
+    LANGCHAIN_* vars that LangChain/LangSmith SDK reads at call time.
+
+    Returns True if configured, False if API key is absent (graceful
+    degradation — agents start normally without tracing in offline dev).
+    Safe to call multiple times; subsequent calls are no-ops.
+    """
+    if os.getenv("LANGCHAIN_TRACING_V2") == "true":
+        return True
+
+    api_key = os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")
+    if not api_key:
+        get_logger(__name__).warning(
+            "LANGSMITH_API_KEY not set — LangSmith tracing disabled"
+        )
+        return False
+
+    project = (
+        os.getenv("LANGCHAIN_PROJECT")
+        or os.getenv("LANGSMITH_PROJECT")
+        or "news-mas-dev"
+    )
+    os.environ["LANGCHAIN_TRACING_V2"] = "true"
+    os.environ["LANGCHAIN_API_KEY"] = api_key
+    os.environ["LANGCHAIN_PROJECT"] = project
+    os.environ.setdefault("LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com")
+    return True

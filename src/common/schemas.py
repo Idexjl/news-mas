@@ -36,6 +36,7 @@ class SearchWorkerInput(BaseModel):
     topics: list[str]
     since_days: int = Field(default=7, ge=1, le=90)
     max_results_per_topic: int = Field(default=10, ge=1, le=50)
+    aap_token: Optional[str] = None  # validated when present; omit in dev/test
 
 
 class SearchWorkerOutput(BaseModel):

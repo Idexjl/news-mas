@@ -24,6 +24,8 @@ dependencies = [
     "tavily-python",
     "ollama",
     "httpx",
+    "beautifulsoup4",
+    "lxml",
     "apscheduler",
     "cryptography",
     "pytest",

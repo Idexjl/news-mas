@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -5,7 +7,8 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from src.common.observability import get_logger, setup_telemetry
+from src.common import agent_registry
+from src.common.observability import configure_langsmith, get_logger, setup_telemetry
 from src.common.schemas import SearchWorkerInput, SearchWorkerOutput
 from src.auth.workload_identity import get_identity_provider
 # [DPOP-TODO] Replace SecurityHeaderMiddleware with DPoPAuthMiddleware once
@@ -15,6 +18,7 @@ from src.auth.workload_identity import get_identity_provider
 from .agent import run_agent
 
 setup_telemetry("search-worker")
+configure_langsmith()
 logger = get_logger(__name__)
 
 limiter = Limiter(key_func=get_remote_address)
@@ -45,6 +49,16 @@ app.add_middleware(SecurityHeaderMiddleware)
 #       audience=f"api://{_identity.client_id}",
 #   )
 # Entra ref: https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow
+
+
+@app.on_event("startup")
+async def startup() -> None:
+    agent_registry.register(
+        "search-worker-01",
+        capabilities=["search.web"],
+        endpoint=os.getenv("SERVICE_URL", "http://localhost:8001"),
+    )
+    logger.info("agent_registered", extra={"agent_id": "search-worker-01"})
 
 
 @app.get("/health")

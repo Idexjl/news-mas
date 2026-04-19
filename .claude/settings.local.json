@@ -12,7 +12,9 @@
       "Bash(python -m pytest tests/test_storage.py -v)",
       "Bash(python -m pytest tests/test_security.py -v)",
       "Bash(python -m pytest tests/ --co -q)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "Bash(docker compose restart *)",
+      "Bash(docker compose logs *)"
     ]
   }
 }
