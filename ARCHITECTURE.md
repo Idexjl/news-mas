@@ -55,11 +55,22 @@ SearchWorker → HeatScorer → FilterAgent → Selector → Phase1Judge
 
 **What it does:** Casts a wide net and narrows it to a shortlist.
 
-- `SearchWorker` fetches raw articles for each topic via the Tavily search API.
-- `HeatScorer` assigns each article a 0.0–1.0 heat score (timeliness × impact × relevance).
+- `SearchWorker` fetches raw articles for each topic via the Tavily search API. Each result is
+  returned as a `SearchResult` (extends `RawArticle`) with a `ResultConfidence` value:
+  `FULL` (fetched), `SNIPPET` (fetch failed), `PARTIAL` (truncated), `INJECTED` (discarded),
+  or `SCRUBBED` (PHI removed). Injected articles are returned with empty content so the count
+  flows to the heat scorer without forwarding payload.
+- `HeatScorer` assigns each article a 0.0–1.0 heat score. It skips INJECTED articles and
+  aggregates all confidence values into a `CandidateConfidence` object (attached to
+  `HeatScorerOutput`) that summarises source quality: full/snippet/partial/injection/scrubbed
+  counts, `confidence_ratio` (full / total), and an `overall_confidence` of HIGH/MEDIUM/LOW.
+  Thresholds are configurable via `CONFIDENCE_HIGH_THRESHOLD` / `CONFIDENCE_MEDIUM_THRESHOLD`.
+  Any injection forces `overall_confidence` to LOW regardless of ratio.
 - `FilterAgent` drops articles below a minimum heat threshold.
 - `Selector` picks the top-K articles by heat score.
-- `Phase1Judge` makes a final approve/reject decision on the shortlist.
+- `Phase1Judge` makes a final approve/reject decision on the shortlist. It receives a
+  `CandidateConfidence` object in its input and its prompt instructs it to factor confidence
+  into selection reasoning (HIGH → trust scores at face value; LOW → be conservative).
 
 **Why a judge at the end:** The scorer and filter are statistical; the judge applies
 holistic reasoning across the whole shortlist (e.g. deduplication, topic coverage gaps).
@@ -411,7 +422,9 @@ Egress metrics (Prometheus, via OTel collector):
 
 Prometheus alerting rules are in `prometheus/alerts.yml` (mounted into the Prometheus
 container). Alerts: `EgressInjectionDetected` (high), `TavilyAnomalousQueryLength` (medium),
-`TavilyHighCallVolume` (medium).
+`TavilyHighCallVolume` (medium), `InjectionDetectedInRun` (high — fires when any run has
+injection-flagged results), `LowSourceConfidence` (medium — fires when the 30-minute average
+`confidence_ratio` drops below 0.3, indicating a systematic source quality issue).
 
 Grafana dashboard `configs/grafana/provisioning/dashboards/egress.json` shows Tavily
 call rate, query length distribution, fetch response time, injection detection count,

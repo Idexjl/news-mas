@@ -41,8 +41,9 @@ from tavily import TavilyClient
 from src.auth.token_service import validate_token
 from src.common.observability import configure_langsmith, get_logger, get_meter, get_tracer, setup_telemetry
 from src.common.pii_scrubber import scrub_text
+from src.common.pipeline_errors import ResultConfidence
 from src.common.prompt_loader import make_run_config
-from src.common.schemas import RawArticle, SearchWorkerInput, SearchWorkerOutput
+from src.common.schemas import RawArticle, SearchResult, SearchWorkerInput, SearchWorkerOutput
 from src.common.security import detect_injection
 
 logger = get_logger(__name__)
@@ -183,8 +184,8 @@ async def _process_result(
     tracer: Any,
     http: httpx.AsyncClient,
     result: dict[str, Any],
-) -> RawArticle | None:
-    """Fetch, scrub, and injection-check one Tavily result. Returns RawArticle or None."""
+) -> SearchResult | None:
+    """Fetch, scrub, and injection-check one Tavily result. Returns SearchResult or None."""
     url: str = result.get("url", "")
     title: str = result.get("title", "")
     snippet: str = result.get("content", "")
@@ -198,13 +199,18 @@ async def _process_result(
         span.set_attribute("egress.host", hostname)
         span.set_attribute("egress.type", "content_fetch")
 
+        fetch_failed = False
+        truncated = False
         try:
-            raw_text = (await _fetch_page(http, url))[:_TOKEN_BUDGET]
+            full_text = await _fetch_page(http, url)
+            truncated = len(full_text) > _TOKEN_BUDGET
+            raw_text = full_text[:_TOKEN_BUDGET]
         except Exception as exc:
             logger.info(
                 "page_fetch_fallback",
                 extra={"egress_host": hostname, "error_type": type(exc).__name__},
             )
+            fetch_failed = True
             raw_text = snippet
 
         elapsed = (time.monotonic() - start) * 1000
@@ -238,23 +244,48 @@ async def _process_result(
                     # Never log matched patterns or raw content.
                 },
             )
-            # Security alert metric
             instr["injection_detected"].add(1)
-            # Security event — hostname and pattern count only, never content.
             logger.warning(
                 "egress.security.injection",
                 extra={"egress_host": hostname, "pattern_count": len(patterns)},
             )
-            return None
+            span.set_attribute("egress.confidence", ResultConfidence.INJECTED.value)
+            # Return with empty content — injected payload is never forwarded.
+            return SearchResult(
+                url=url,
+                title="",
+                content="",
+                source=result.get("source", ""),
+                published_at=_parse_published_at(result.get("published_date")),
+                confidence=ResultConfidence.INJECTED,
+                confidence_reason=f"injection_patterns:{len(patterns)}",
+            )
 
+        # Determine source-quality confidence
+        if pii_count > 0:
+            confidence = ResultConfidence.SCRUBBED
+            confidence_reason = f"phi_entities:{pii_count}"
+        elif fetch_failed:
+            confidence = ResultConfidence.SNIPPET
+            confidence_reason = "fetch_failed"
+        elif truncated:
+            confidence = ResultConfidence.PARTIAL
+            confidence_reason = "truncated_at_token_budget"
+        else:
+            confidence = ResultConfidence.FULL
+            confidence_reason = None
+
+        span.set_attribute("egress.confidence", confidence.value)
         instr["fetch_calls"].add(1)
 
-    return RawArticle(
+    return SearchResult(
         url=url,
         title=scrubbed_title,
         content=scrubbed_content,
         published_at=_parse_published_at(result.get("published_date")),
         source=result.get("source", ""),
+        confidence=confidence,
+        confidence_reason=confidence_reason,
     )
 
 
@@ -264,7 +295,7 @@ async def _search_topic(
     topic: str,
     inp: SearchWorkerInput,
     tracer: Any,
-) -> list[RawArticle]:
+) -> list[SearchResult]:
     """Run Tavily search for one topic, fetch pages concurrently, scrub, return articles."""
 
     with tracer.start_as_current_span("search_worker.search") as span:
@@ -375,12 +406,12 @@ async def _search_topic(
 
         # Fetch, scrub, and injection-check all results concurrently.
         async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT) as http:
-            processed: list[RawArticle | None | BaseException] = await asyncio.gather(
+            processed: list[SearchResult | None | BaseException] = await asyncio.gather(
                 *[_process_result(tracer, http, r) for r in results],
                 return_exceptions=True,
             )
 
-        articles: list[RawArticle] = []
+        articles: list[SearchResult] = []
         for item in processed:
             if isinstance(item, BaseException):
                 logger.error(
@@ -389,6 +420,15 @@ async def _search_topic(
                 )
             elif item is not None:
                 articles.append(item)
+
+        # Confidence distribution span — aggregate counts across all fetched results.
+        with tracer.start_as_current_span("search_worker.scrub") as scrub_span:
+            full_count = sum(1 for a in articles if a.confidence == ResultConfidence.FULL)
+            snippet_count = sum(1 for a in articles if a.confidence == ResultConfidence.SNIPPET)
+            injected_count = sum(1 for a in articles if a.confidence == ResultConfidence.INJECTED)
+            scrub_span.set_attribute("confidence.full_count", full_count)
+            scrub_span.set_attribute("confidence.snippet_count", snippet_count)
+            scrub_span.set_attribute("confidence.injected_count", injected_count)
 
         span.set_attribute("articles_kept", len(articles))
         logger.info(
@@ -419,12 +459,12 @@ async def _traced_run(inp: SearchWorkerInput, *, tracer: Any = None) -> SearchWo
     """
     active_tracer = tracer if tracer is not None else get_tracer("search-worker")
 
-    topic_results: list[list[RawArticle] | BaseException] = await asyncio.gather(
+    topic_results: list[list[SearchResult] | BaseException] = await asyncio.gather(
         *[_search_topic(topic, inp, active_tracer) for topic in inp.topics],
         return_exceptions=True,
     )
 
-    articles: list[RawArticle] = []
+    articles: list[SearchResult] = []
     for topic, result in zip(inp.topics, topic_results):
         if isinstance(result, BaseException):
             logger.error(

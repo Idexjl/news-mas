@@ -24,7 +24,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from src.common.prompt_loader import make_run_config
-from src.common.schemas import HeatScorerInput, RawArticle
+from src.common.schemas import HeatScorerInput, SearchResult
 from src.agents.heat_scorer.agent import run_agent
 
 _INTEGRATION = os.getenv("INTEGRATION_TESTS", "").lower() == "true"
@@ -54,9 +54,9 @@ def span_tracer():
 
 
 @pytest.fixture()
-def ai_article() -> RawArticle:
+def ai_article() -> SearchResult:
     """Synthetic AI news article — no PHI, no injection attempts."""
-    return RawArticle(
+    return SearchResult(
         url="https://example.com/ai-reasoning-model",
         title="Major AI Lab Releases Next-Generation Reasoning Model",
         content=(

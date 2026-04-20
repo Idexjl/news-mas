@@ -19,6 +19,7 @@ from src.common.schemas import (
     RunState,
     RunStatus,
     ScoredArticle,
+    SearchResult,
     SearchWorkerInput,
     SearchWorkerOutput,
     SelectorInput,
@@ -30,7 +31,7 @@ from src.common.schemas import (
 
 @pytest.fixture
 def article():
-    return RawArticle(
+    return SearchResult(
         url="https://example.com/news/1",
         title="Test Article",
         content="Body text here.",

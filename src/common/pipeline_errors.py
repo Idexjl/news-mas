@@ -32,6 +32,14 @@ class ErrorSeverity(str, Enum):
     DEGRADED = "DEGRADED"    # continue with reduced quality / partial output
 
 
+class ResultConfidence(str, Enum):
+    FULL = "full"          # fetched full content
+    SNIPPET = "snippet"    # fetch failed, snippet only
+    PARTIAL = "partial"    # fetched but truncated at TOKEN_BUDGET
+    INJECTED = "injected"  # injection detected, content discarded
+    SCRUBBED = "scrubbed"  # PHI removed, content altered
+
+
 class PipelineError(BaseModel):
     """
     Structured error record threaded through the pipeline.

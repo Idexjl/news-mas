@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from src.common.pipeline_errors import AgentResult  # noqa: F401 — re-exported for agent use
+from src.common.pipeline_errors import AgentResult, ResultConfidence  # noqa: F401 — re-exported for agent use
 
 
 # ── Shared primitives ─────────────────────────────────────────────────────────
@@ -17,6 +18,76 @@ class RawArticle(BaseModel):
     content: str
     published_at: Optional[datetime] = None
     source: str = ""
+
+
+class SearchResult(RawArticle):
+    """RawArticle annotated with source-quality confidence set by SearchWorker."""
+    confidence: ResultConfidence = ResultConfidence.FULL
+    confidence_reason: Optional[str] = None
+
+
+class CandidateConfidence(BaseModel):
+    """Aggregated source-quality metrics for a batch of search results."""
+    topic_id: str = ""
+    heat_score: float = 0.0
+    total_results: int = 0
+    full_content_count: int = 0
+    snippet_only_count: int = 0
+    partial_count: int = 0
+    injection_detected_count: int = 0
+    phi_scrubbed_count: int = 0
+    confidence_ratio: float = 0.0
+    overall_confidence: Literal["HIGH", "MEDIUM", "LOW"] = "LOW"
+
+    @classmethod
+    def from_results(
+        cls,
+        results: list[SearchResult],
+        *,
+        topic_id: str = "",
+        heat_score: float = 0.0,
+        high_threshold: float | None = None,
+        medium_threshold: float | None = None,
+    ) -> "CandidateConfidence":
+        _high = high_threshold if high_threshold is not None else float(
+            os.getenv("CONFIDENCE_HIGH_THRESHOLD", "0.7")
+        )
+        _medium = medium_threshold if medium_threshold is not None else float(
+            os.getenv("CONFIDENCE_MEDIUM_THRESHOLD", "0.3")
+        )
+        total = len(results)
+        if total == 0:
+            return cls(topic_id=topic_id, heat_score=heat_score)
+
+        full = sum(1 for r in results if r.confidence == ResultConfidence.FULL)
+        snippet = sum(1 for r in results if r.confidence == ResultConfidence.SNIPPET)
+        partial = sum(1 for r in results if r.confidence == ResultConfidence.PARTIAL)
+        injected = sum(1 for r in results if r.confidence == ResultConfidence.INJECTED)
+        scrubbed = sum(1 for r in results if r.confidence == ResultConfidence.SCRUBBED)
+
+        ratio = full / total
+
+        if injected > 0:
+            overall: Literal["HIGH", "MEDIUM", "LOW"] = "LOW"
+        elif ratio >= _high:
+            overall = "HIGH"
+        elif ratio >= _medium:
+            overall = "MEDIUM"
+        else:
+            overall = "LOW"
+
+        return cls(
+            topic_id=topic_id,
+            heat_score=heat_score,
+            total_results=total,
+            full_content_count=full,
+            snippet_only_count=snippet,
+            partial_count=partial,
+            injection_detected_count=injected,
+            phi_scrubbed_count=scrubbed,
+            confidence_ratio=ratio,
+            overall_confidence=overall,
+        )
 
 
 class ScoredArticle(BaseModel):
@@ -43,20 +114,21 @@ class SearchWorkerInput(BaseModel):
 
 class SearchWorkerOutput(AgentResult):
     run_id: str
-    articles: list[RawArticle] = Field(default_factory=list)
+    articles: list[SearchResult] = Field(default_factory=list)
 
 
 # ── Heat Scorer ───────────────────────────────────────────────────────────────
 
 class HeatScorerInput(BaseModel):
     run_id: str
-    articles: list[RawArticle]
+    articles: list[SearchResult]
     aap_token: Optional[str] = None  # validated when present; omit in dev/test
 
 
 class HeatScorerOutput(AgentResult):
     run_id: str
     scored_articles: list[ScoredArticle] = Field(default_factory=list)
+    candidate_confidence: Optional[CandidateConfidence] = None
 
 
 # ── Filter Agent ──────────────────────────────────────────────────────────────
@@ -91,6 +163,7 @@ class SelectorOutput(AgentResult):
 class Phase1JudgeInput(BaseModel):
     run_id: str
     selected_articles: list[ScoredArticle]
+    candidate_confidence: Optional[CandidateConfidence] = None
 
 
 class Phase1JudgeOutput(AgentResult):
@@ -150,6 +223,8 @@ class DigestEntry(BaseModel):
     key_points: list[str]
     heat_score: float
     relevance_confidence: float
+    confidence: Optional[Literal["HIGH", "MEDIUM", "LOW"]] = None
+    confidence_note: Optional[str] = None
 
 
 class RunStatus(str, Enum):

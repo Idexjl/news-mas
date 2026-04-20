@@ -27,3 +27,24 @@ groups:
         annotations:
           summary: "Unusual Tavily call volume"
           description: "Possible runaway scheduler or loop"
+
+  - name: mas_confidence
+    rules:
+      - alert: InjectionDetectedInRun
+        expr: increase(news_mas_mas_egress_injection_detected_total[15m]) > 0
+        labels:
+          severity: high
+        annotations:
+          summary: "Injection detected in search results this run"
+          description: "At least one result had injection patterns. Check Jaeger egress.http.fetch spans."
+
+      - alert: LowSourceConfidence
+        expr: >
+          avg_over_time(
+            news_mas_candidate_confidence_ratio[30m]
+          ) < 0.3
+        labels:
+          severity: medium
+        annotations:
+          summary: "Average source confidence ratio below 0.3"
+          description: "Systematic source quality issue — most results falling back to snippets."

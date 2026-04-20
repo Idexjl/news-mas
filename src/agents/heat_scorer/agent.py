@@ -57,9 +57,9 @@ from src.common.observability import (
     record_span_error,
     setup_telemetry,
 )
-from src.common.pipeline_errors import AgentResult, ErrorSeverity, PipelineError  # noqa: F401
+from src.common.pipeline_errors import AgentResult, ErrorSeverity, PipelineError, ResultConfidence  # noqa: F401
 from src.common.prompt_loader import get_system_prompt, load_prompt, make_run_config
-from src.common.schemas import HeatScorerInput, HeatScorerOutput, RawArticle, ScoredArticle
+from src.common.schemas import CandidateConfidence, HeatScorerInput, HeatScorerOutput, RawArticle, ScoredArticle
 
 _DEFAULT_MODEL = "gemma4:e4b"
 _AGENT_ID = "heat-scorer"
@@ -396,6 +396,11 @@ async def _traced_run(
     result_count = len(inp.articles)
 
     for i, article in enumerate(inp.articles):
+        # Skip articles where injection was detected — content was discarded.
+        if article.confidence == ResultConfidence.INJECTED:
+            warnings.append(f"article_{i}_skipped:injected")
+            continue
+
         result = await _score_one_article(
             article,
             i,
@@ -422,6 +427,15 @@ async def _traced_run(
         else:
             scored_articles.append(result)
 
+    avg_heat = (
+        sum(sa.heat_score for sa in scored_articles) / len(scored_articles)
+        if scored_articles else 0.0
+    )
+    candidate_confidence = CandidateConfidence.from_results(
+        inp.articles,
+        heat_score=avg_heat,
+    )
+
     logger.info(
         "heat_scorer_complete",
         extra={
@@ -429,6 +443,8 @@ async def _traced_run(
             "articles_scored": len(scored_articles),
             "articles_skipped": len(warnings),
             "model_id": model_id,
+            "overall_confidence": candidate_confidence.overall_confidence,
+            "confidence_ratio": candidate_confidence.confidence_ratio,
         },
     )
 
@@ -437,6 +453,7 @@ async def _traced_run(
         success=True,
         scored_articles=scored_articles,
         warnings=warnings,
+        candidate_confidence=candidate_confidence,
     )
 
 
