@@ -26,6 +26,7 @@ from typing import Any
 
 import httpx
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 
 try:
     from langsmith import traceable as _ls_traceable
@@ -38,7 +39,7 @@ except ImportError:  # graceful degradation if langsmith is unavailable
 from tavily import TavilyClient
 
 from src.auth.token_service import validate_token
-from src.common.observability import get_logger, get_meter, get_tracer
+from src.common.observability import configure_langsmith, get_logger, get_meter, get_tracer, setup_telemetry
 from src.common.pii_scrubber import scrub_text
 from src.common.prompt_loader import make_run_config
 from src.common.schemas import RawArticle, SearchWorkerInput, SearchWorkerOutput
@@ -458,6 +459,15 @@ async def run_agent(inp: SearchWorkerInput, *, tracer: Any = None) -> SearchWork
     Public entry point. ``tracer`` is optional; pass a test-scoped tracer to
     capture spans without touching the global OTel provider.
     """
+    load_dotenv()
+    setup_telemetry("news-mas-search-worker")
+    langsmith_active = configure_langsmith()
+    logger.info("agent.startup", extra={
+        "otel_endpoint": os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+        "langsmith_enabled": langsmith_active,
+        "service_name": os.getenv("SERVICE_NAME"),
+    })
+
     run_cfg = make_run_config("search_worker", run_id=inp.run_id)
     logger.info(
         "search_worker_start",

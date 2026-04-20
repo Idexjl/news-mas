@@ -101,7 +101,7 @@ All agents expose `GET /health` (no auth) and `POST /run` (auth required). Rate 
 |---|---|---|---|---|---|
 | `registry` | 8000 | — | — | — | Stores and serves AgentConfig; seeds defaults on startup |
 | `search_worker` | 8001 | 1 | tavily | — | Fetch raw articles from Tavily for each topic |
-| `heat_scorer` | 8002 | 1 | ollama | `gemma4:e4b` | Score articles 0.0–1.0 on timeliness × impact × relevance |
+| `heat_scorer` | 8002 | 1 | ollama | `gemma4:e4b` | Score articles 0.0–1.0 on volume × velocity × novelty × significance |
 | `filter_agent` | 8003 | 1 | none | — | Drop articles below `min_heat_score` threshold |
 | `selector` | 8004 | 1 | none | — | Pick top-K articles by heat score |
 | `phase1_judge` | 8005 | 1 | ollama | `gemma4:e4b` | Holistic approve/reject over the shortlist |

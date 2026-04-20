@@ -58,7 +58,7 @@ def setup_telemetry(service_name: str) -> trace.Tracer:
     if _tracer is not None:
         return _tracer
 
-    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317")
     resource = _build_resource(service_name)
     provider = TracerProvider(resource=resource)
     exporter = OTLPSpanExporter(endpoint=endpoint, insecure=True)
@@ -77,7 +77,7 @@ def setup_metrics(service_name: str) -> metrics.Meter:
     if _meter_provider is not None:
         return metrics.get_meter(service_name)
 
-    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317")
     resource = _build_resource(service_name)
     exporter = OTLPMetricExporter(endpoint=endpoint, insecure=True)
     reader = PeriodicExportingMetricReader(exporter, export_interval_millis=10_000)
@@ -94,6 +94,31 @@ def get_tracer(service_name: str = "news-mas") -> trace.Tracer:
 
 def get_meter(name: str = "news-mas") -> metrics.Meter:
     return metrics.get_meter(name)
+
+
+class _DynamicStderrHandler(logging.Handler):
+    """
+    Handler that always writes to the current ``sys.stderr`` rather than
+    capturing a reference at construction time.
+
+    Python's built-in ``StreamHandler()`` stores ``self.stream = sys.stderr``
+    at ``__init__``. If pytest's ``capsys`` fixture later replaces ``sys.stderr``
+    with a capture buffer, the stored reference still points to the original
+    stream, so the warning is invisible to ``capsys.readouterr()``.
+
+    By calling ``sys.stderr.write()`` dynamically on every emit we always
+    target whatever ``sys.stderr`` currently resolves to, making structured-log
+    output capturable by both ``capsys`` and production log aggregators.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            import sys as _sys  # local import so the reference is always fresh
+            msg = self.format(record)
+            _sys.stderr.write(msg + "\n")
+            _sys.stderr.flush()
+        except Exception:
+            self.handleError(record)
 
 
 class _SafeJSONFormatter(logging.Formatter):
@@ -155,7 +180,7 @@ def get_logger(name: str) -> logging.Logger:
     """
     logger = logging.getLogger(name)
     if not logger.handlers:
-        handler = logging.StreamHandler()
+        handler = _DynamicStderrHandler()
         handler.setFormatter(_SafeJSONFormatter())
         logger.addHandler(handler)
         logger.propagate = False

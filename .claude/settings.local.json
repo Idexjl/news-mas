@@ -20,7 +20,15 @@
       "Bash(docker-compose restart *)",
       "Bash(.venv/Scripts/pip show *)",
       "Bash(docker-compose down *)",
-      "Bash(docker-compose up *)"
+      "Bash(docker-compose up *)",
+      "PowerShell(cd \"C:\\\\Users\\\\Joe\\\\OneDrive\\\\Desktop\\\\git\\\\news-mas\"; $env:INTEGRATION_TESTS=\"true\"; python -m pytest tests/integration/test_heat_scorer_live.py -v -s 2>&1)",
+      "PowerShell(cd \"C:\\\\Users\\\\Joe\\\\OneDrive\\\\Desktop\\\\git\\\\news-mas\"; $env:INTEGRATION_TESTS=\"true\"; python -m pytest tests/integration/test_heat_scorer_live.py::test_heat_scorer_traced_run_is_callable tests/integration/test_heat_scorer_live.py::test_heat_scorer_langsmith_run_config_tags -v 2>&1)",
+      "Bash(echo \"EXIT:$?\")",
+      "PowerShell(Set-Location \"C:\\\\Users\\\\Joe\\\\OneDrive\\\\Desktop\\\\git\\\\news-mas\"; Select-String -Path \"docker-compose.yml\" -Pattern \"jaeger\" -Context 0,25 | Select-Object -First 1 | ForEach-Object { $_.Context.PreContext; $_.Line; $_.Context.PostContext })",
+      "PowerShell(Invoke-RestMethod -Uri \"http://localhost:16686/api/services\" -Method Get | ConvertTo-Json)",
+      "PowerShell(docker exec otel-collector *)",
+      "PowerShell(docker network inspect *)",
+      "PowerShell(Invoke-RestMethod -Uri \"http://127.0.0.1:8888/metrics\" | Select-String -Pattern \"exporter.*traces|otlp.*traces|sent_spans|failed_spans\" | Select-Object -First 20)"
     ]
   }
 }

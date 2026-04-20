@@ -51,6 +51,7 @@ class SearchWorkerOutput(AgentResult):
 class HeatScorerInput(BaseModel):
     run_id: str
     articles: list[RawArticle]
+    aap_token: Optional[str] = None  # validated when present; omit in dev/test
 
 
 class HeatScorerOutput(AgentResult):
