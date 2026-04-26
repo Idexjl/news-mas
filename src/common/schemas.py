@@ -133,28 +133,70 @@ class HeatScorerOutput(AgentResult):
 
 # ── Filter Agent ──────────────────────────────────────────────────────────────
 
+class RemovalReason(BaseModel):
+    """Records why a result was removed. Constraint text is never stored here."""
+    url: str
+    constraint_violated: int  # index into constraints list; -1 = auto-removed (injected)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    note: str = ""  # e.g. "snippet only — limited context"; never contains constraint text
+
+
 class FilterAgentInput(BaseModel):
     run_id: str
     scored_articles: list[ScoredArticle]
     min_heat_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    constraints: list[str] = Field(default_factory=list)
+    search_results: list[SearchResult] = Field(default_factory=list)
+    aap_token: Optional[str] = None
 
 
 class FilterAgentOutput(AgentResult):
     run_id: str
     filtered_articles: list[ScoredArticle] = Field(default_factory=list)
     dropped_count: int = 0
+    kept_results: list[ScoredArticle] = Field(default_factory=list)
+    removed_results: list[ScoredArticle] = Field(default_factory=list)
+    removal_reasons: list[RemovalReason] = Field(default_factory=list)
 
 
 # ── Selector ──────────────────────────────────────────────────────────────────
 
+class ScoredFilteredTopic(BaseModel):
+    """Per-topic bundle passed to the Selector after scoring and filtering."""
+    topic_id: str
+    topic_text: str  # user-defined query — never logged or recorded in spans
+    heat_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    kept_results: list[ScoredArticle] = Field(default_factory=list)
+    confidence: Literal["HIGH", "MEDIUM", "LOW"] = "LOW"
+    removal_reasons: list[RemovalReason] = Field(default_factory=list)
+
+
+class SelectedTopic(BaseModel):
+    topic_id: str
+    rank: int
+    selection_reasoning: str
+    confidence_assessment: Literal["HIGH", "MEDIUM", "LOW"] = "MEDIUM"
+
+
+class RejectedTopic(BaseModel):
+    topic_id: str
+    reject_reason: str
+
+
 class SelectorInput(BaseModel):
     run_id: str
-    filtered_articles: list[ScoredArticle]
-    max_select: int = Field(default=10, ge=1, le=50)
+    topics: list[ScoredFilteredTopic]
+    max_select: int = Field(default=5, ge=1, le=50)
+    topic_memory_context: Optional[dict] = None  # {topic_id: [run_outcome, ...]}
+    aap_token: Optional[str] = None
 
 
 class SelectorOutput(AgentResult):
     run_id: str
+    selected: list[SelectedTopic] = Field(default_factory=list)
+    rejected: list[RejectedTopic] = Field(default_factory=list)
+    selection_confidence: Literal["HIGH", "MEDIUM", "LOW"] = "LOW"
+    diversity_note: Optional[str] = None
     selected_articles: list[ScoredArticle] = Field(default_factory=list)
 
 

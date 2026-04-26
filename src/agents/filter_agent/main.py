@@ -9,7 +9,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from src.common import agent_registry
 from src.common.agent_bootstrap import bootstrap_agent
-from src.common.observability import get_logger, get_tracer, setup_telemetry
+from src.common.observability import configure_langsmith, get_logger, get_tracer, setup_telemetry
 from src.common.schemas import FilterAgentInput, FilterAgentOutput
 from src.auth.workload_identity import get_identity_provider
 # [DPOP-TODO] Replace SecurityHeaderMiddleware with DPoPAuthMiddleware once
@@ -19,6 +19,7 @@ from src.auth.workload_identity import get_identity_provider
 from .agent import run_agent
 
 setup_telemetry("filter-agent")
+configure_langsmith()
 logger = get_logger(__name__)
 
 limiter = Limiter(key_func=get_remote_address)
@@ -86,4 +87,6 @@ async def health():
 @limiter.limit("30/minute")
 async def run(request: Request, payload: FilterAgentInput):
     logger.info("run requested", extra={"run_id": payload.run_id})
-    return await run_agent(payload)
+    config = getattr(request.app.state, "agent_config", None)
+    model_id = config.model_id if config else None
+    return await run_agent(payload, model_id=model_id)

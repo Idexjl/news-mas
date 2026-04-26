@@ -66,8 +66,8 @@ SearchWorker → HeatScorer → FilterAgent → Selector → Phase1Judge
   counts, `confidence_ratio` (full / total), and an `overall_confidence` of HIGH/MEDIUM/LOW.
   Thresholds are configurable via `CONFIDENCE_HIGH_THRESHOLD` / `CONFIDENCE_MEDIUM_THRESHOLD`.
   Any injection forces `overall_confidence` to LOW regardless of ratio.
-- `FilterAgent` drops articles below a minimum heat threshold.
-- `Selector` picks the top-K articles by heat score.
+- `FilterAgent` enforces semantic constraints such as "no never-trumpers" or "no opinion pieces". It uses Gemma 4 to understand the *intent* of each constraint, not keyword matching. `INJECTED` articles are auto-removed without an LLM call. Results are batched (max 5 per call, configurable via `FILTER_BATCH_SIZE`). Constraint text is treated as user data and never appears in logs or OTel spans — violations are recorded by constraint index only. `FilterAgentOutput` carries `kept_results`, `removed_results`, and `removal_reasons` (with URL, constraint index, confidence, and an optional note for snippet-only removals).
+- `Selector` makes a curatorial selection of the top MAX_CANDIDATES topics (default 5). It uses Gemma 4 to reason holistically over four signals: heat score, source confidence (HIGH/MEDIUM/LOW from `CandidateConfidence`), content coverage quality (kept vs. removed results ratio), and category diversity. When `ENFORCE_DIVERSITY=true` (default), it actively avoids selecting five topics from the same domain even if they rank highest by heat score alone. An optional `topic_memory_context` input carries the last 3 run outcomes per topic from `TopicMemoryRepository` when available. Input is `ScoredFilteredTopic` objects (one per user topic); output is `SelectorOutput` with `selected[]` (topic_id, rank, reasoning), `rejected[]` (topic_id, reject_reason), `selection_confidence`, and `selected_articles` (flattened kept results for Phase1Judge).
 - `Phase1Judge` makes a final approve/reject decision on the shortlist. It receives a
   `CandidateConfidence` object in its input and its prompt instructs it to factor confidence
   into selection reasoning (HIGH → trust scores at face value; LOW → be conservative).
@@ -113,15 +113,14 @@ All agents expose `GET /health` (no auth) and `POST /run` (auth required). Rate 
 | `registry` | 8000 | — | — | — | Stores and serves AgentConfig; seeds defaults on startup |
 | `search_worker` | 8001 | 1 | tavily | — | Fetch raw articles from Tavily for each topic |
 | `heat_scorer` | 8002 | 1 | ollama | `gemma4:e4b` | Score articles 0.0–1.0 on volume × velocity × novelty × significance |
-| `filter_agent` | 8003 | 1 | none | — | Drop articles below `min_heat_score` threshold |
-| `selector` | 8004 | 1 | none | — | Pick top-K articles by heat score |
+| `filter_agent` | 8003 | 1 | ollama | `gemma4:e4b` | Semantic constraint filtering — drops articles that violate user-defined intent constraints |
+| `selector` | 8004 | 1 | ollama† | `gemma4:e4b` | Holistic topic selection with diversity enforcement |
 | `phase1_judge` | 8005 | 1 | ollama | `gemma4:e4b` | Holistic approve/reject over the shortlist |
 | `summarizer` | 8006 | 2 | anthropic | `claude-sonnet-4-6` | Generate summary + key points for one article |
 | `reviewer` | 8007 | 2 | anthropic | `claude-sonnet-4-6` | Evaluate summary quality; approve or request revision |
 | `relevance_gate` | 8008 | 2 | ollama | `gemma4:e4b` | Score digest relevance confidence; gate final inclusion |
 
-`search_worker`, `filter_agent`, and `selector` are deterministic or near-deterministic
-(threshold comparisons, ranking). They do not require LLM calls.
+†`filter_agent` and `selector` use Gemma 4 via Ollama for their respective reasoning tasks — semantic constraint filtering and holistic topic selection — even though their registry entries still show `model_provider: none` (a registry metadata lag from when they were planned as deterministic; both agents load `gemma4:e4b` directly and respect `MODEL_OVERRIDE`).
 
 **Model assignment is stored in the registry, not hardcoded.** The registry seeds default
 `AgentConfig` records on startup (`src/registry/registry_server.py`). Agents fetch their

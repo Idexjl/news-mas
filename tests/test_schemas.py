@@ -19,9 +19,11 @@ from src.common.schemas import (
     RunState,
     RunStatus,
     ScoredArticle,
+    ScoredFilteredTopic,
     SearchResult,
     SearchWorkerInput,
     SearchWorkerOutput,
+    SelectedTopic,
     SelectorInput,
     SelectorOutput,
     SummarizerInput,
@@ -90,10 +92,23 @@ def test_filter_agent_io(scored):
 
 # ── Selector ──────────────────────────────────────────────────────────────────
 
-def test_selector_io(scored):
-    inp = SelectorInput(run_id="r1", filtered_articles=[scored], max_select=5)
-    out = SelectorOutput(run_id="r1", selected_articles=[scored])
+def test_selector_io(scored, article):
+    topic = ScoredFilteredTopic(
+        topic_id="t1",
+        topic_text="test query",
+        heat_score=0.75,
+        kept_results=[scored],
+        confidence="HIGH",
+    )
+    inp = SelectorInput(run_id="r1", topics=[topic], max_select=5)
+    assert inp.topics[0].topic_id == "t1"
+    assert inp.max_select == 5
+
+    sel = SelectedTopic(topic_id="t1", rank=1, selection_reasoning="top pick")
+    out = SelectorOutput(run_id="r1", selected=[sel], selected_articles=[scored])
+    assert len(out.selected) == 1
     assert len(out.selected_articles) == 1
+    assert out.selected[0].rank == 1
 
 
 # ── Phase1Judge ───────────────────────────────────────────────────────────────
