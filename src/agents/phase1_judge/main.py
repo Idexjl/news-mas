@@ -87,4 +87,6 @@ async def health():
 @limiter.limit("30/minute")
 async def run(request: Request, payload: Phase1JudgeInput):
     logger.info("run requested", extra={"run_id": payload.run_id})
-    return await run_agent(payload)
+    config = getattr(request.app.state, "agent_config", None)
+    model_id = config.model_id if config else None
+    return await run_agent(payload, model_id=model_id)

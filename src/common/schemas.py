@@ -202,14 +202,43 @@ class SelectorOutput(AgentResult):
 
 # ── Phase 1 Judge ─────────────────────────────────────────────────────────────
 
+class JudgeAdjustment(BaseModel):
+    """A single swap the Phase 1 Judge made to the selector's choices."""
+    action: Literal["swap"] = "swap"
+    removed_topic_id: str
+    added_topic_id: str
+    reason_code: Literal["confidence_upgrade", "diversity_improvement", "quality_concern"]
+
+
+class JudgedTopic(BaseModel):
+    """A topic in the judge's final selection, annotated with provenance."""
+    topic_id: str
+    rank: int
+    source: Literal["selector", "judge"] = "selector"
+    judge_reasoning: Optional[str] = None  # set only when source == "judge"
+
+
 class Phase1JudgeInput(BaseModel):
     run_id: str
-    selected_articles: list[ScoredArticle]
+    # Full-picture topic-level inputs from the selector
+    all_candidates: list[ScoredFilteredTopic] = Field(default_factory=list)
+    selected: list[SelectedTopic] = Field(default_factory=list)
+    rejected: list[RejectedTopic] = Field(default_factory=list)
     candidate_confidence: Optional[CandidateConfidence] = None
+    since_date: Optional[str] = None
+    aap_token: Optional[str] = None
+    # Retained for Phase 2 compatibility (flat article list from selector output)
+    selected_articles: list[ScoredArticle] = Field(default_factory=list)
 
 
 class Phase1JudgeOutput(AgentResult):
     run_id: str
+    verdict: Literal["endorsed", "adjusted"] = "endorsed"
+    final_selected: list[JudgedTopic] = Field(default_factory=list)
+    adjustments: list[JudgeAdjustment] = Field(default_factory=list)
+    endorsement_note: Optional[str] = None
+    overall_confidence: Literal["HIGH", "MEDIUM", "LOW"] = "LOW"
+    # Flat approved-article list consumed by Phase 2 orchestrator
     judged_articles: list[JudgedArticle] = Field(default_factory=list)
 
 

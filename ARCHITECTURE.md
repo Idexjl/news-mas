@@ -68,13 +68,9 @@ SearchWorker → HeatScorer → FilterAgent → Selector → Phase1Judge
   Any injection forces `overall_confidence` to LOW regardless of ratio.
 - `FilterAgent` enforces semantic constraints such as "no never-trumpers" or "no opinion pieces". It uses Gemma 4 to understand the *intent* of each constraint, not keyword matching. `INJECTED` articles are auto-removed without an LLM call. Results are batched (max 5 per call, configurable via `FILTER_BATCH_SIZE`). Constraint text is treated as user data and never appears in logs or OTel spans — violations are recorded by constraint index only. `FilterAgentOutput` carries `kept_results`, `removed_results`, and `removal_reasons` (with URL, constraint index, confidence, and an optional note for snippet-only removals).
 - `Selector` makes a curatorial selection of the top MAX_CANDIDATES topics (default 5). It uses Gemma 4 to reason holistically over four signals: heat score, source confidence (HIGH/MEDIUM/LOW from `CandidateConfidence`), content coverage quality (kept vs. removed results ratio), and category diversity. When `ENFORCE_DIVERSITY=true` (default), it actively avoids selecting five topics from the same domain even if they rank highest by heat score alone. An optional `topic_memory_context` input carries the last 3 run outcomes per topic from `TopicMemoryRepository` when available. Input is `ScoredFilteredTopic` objects (one per user topic); output is `SelectorOutput` with `selected[]` (topic_id, rank, reasoning), `rejected[]` (topic_id, reject_reason), `selection_confidence`, and `selected_articles` (flattened kept results for Phase1Judge).
-- `Phase1Judge` makes a final approve/reject decision on the shortlist. It receives a
-  `CandidateConfidence` object in its input and its prompt instructs it to factor confidence
-  into selection reasoning (HIGH → trust scores at face value; LOW → be conservative).
+- `Phase1Judge` is an independent single-pass reviewer of the selector's topic choices. It receives the full picture: all candidates (with heat scores and confidence), the selector's selections with their reasoning, and the selector's rejections with their reasons. The judge either **ENDORSES** (selector's choices are sound) or **ADJUSTS** (makes targeted swaps within the existing candidate pool). Adjustments are one of three types: `confidence_upgrade` (swapping a LOW-confidence selection for a HIGH-confidence alternative), `diversity_improvement` (reducing category concentration), or `quality_concern` (extreme removal-ratio coverage issue). The judge is biased toward endorsement — it adjusts only when there is a clear quality failure, not to re-rank from scratch. Every adjustment is emitted as a `phase1_judge.adjustment` OTel span event (topic IDs + reason_code only, never reasoning text). `Phase1JudgeOutput` carries `verdict`, `final_selected[]` (with `source="selector"|"judge"` provenance), `adjustments[]`, `overall_confidence`, and `judged_articles` (flat approved-article list consumed by Phase 2).
 
-**Why a judge at the end:** The scorer and filter are statistical; the judge applies
-holistic reasoning across the whole shortlist (e.g. deduplication, topic coverage gaps).
-Keeping them separate means the scoring logic stays simple and the judge has full context.
+**Why a judge at the end:** The selector applies holistic ranking; the judge provides independent quality assurance for confidence and coverage failures the selector may have missed. Single-pass design prevents runaway retry loops on a single topic.
 
 ### Phase 2 — Summarisation and Quality Gate
 
@@ -115,7 +111,7 @@ All agents expose `GET /health` (no auth) and `POST /run` (auth required). Rate 
 | `heat_scorer` | 8002 | 1 | ollama | `gemma4:e4b` | Score articles 0.0–1.0 on volume × velocity × novelty × significance |
 | `filter_agent` | 8003 | 1 | ollama | `gemma4:e4b` | Semantic constraint filtering — drops articles that violate user-defined intent constraints |
 | `selector` | 8004 | 1 | ollama† | `gemma4:e4b` | Holistic topic selection with diversity enforcement |
-| `phase1_judge` | 8005 | 1 | ollama | `gemma4:e4b` | Holistic approve/reject over the shortlist |
+| `phase1_judge` | 8005 | 1 | ollama | `gemma4:e4b` | Independent single-pass review: ENDORSE or ADJUST selector choices |
 | `summarizer` | 8006 | 2 | anthropic | `claude-sonnet-4-6` | Generate summary + key points for one article |
 | `reviewer` | 8007 | 2 | anthropic | `claude-sonnet-4-6` | Evaluate summary quality; approve or request revision |
 | `relevance_gate` | 8008 | 2 | ollama | `gemma4:e4b` | Score digest relevance confidence; gate final inclusion |

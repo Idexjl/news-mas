@@ -8,7 +8,9 @@ from src.common.schemas import (
     FilterAgentOutput,
     HeatScorerInput,
     HeatScorerOutput,
+    JudgeAdjustment,
     JudgedArticle,
+    JudgedTopic,
     Phase1JudgeInput,
     Phase1JudgeOutput,
     RawArticle,
@@ -114,10 +116,36 @@ def test_selector_io(scored, article):
 # ── Phase1Judge ───────────────────────────────────────────────────────────────
 
 def test_phase1_judge_io(article, scored):
+    # Backward-compat: selected_articles still accepted
     inp = Phase1JudgeInput(run_id="r1", selected_articles=[scored])
+    assert inp.run_id == "r1"
+    assert len(inp.selected_articles) == 1
+    # New topic-level fields default to empty
+    assert inp.all_candidates == []
+    assert inp.selected == []
+
+    # New output fields
+    jt = JudgedTopic(topic_id="t1", rank=1, source="judge", judge_reasoning="quality upgrade")
+    adj = JudgeAdjustment(
+        removed_topic_id="t-old",
+        added_topic_id="t1",
+        reason_code="confidence_upgrade",
+    )
+    out = Phase1JudgeOutput(
+        run_id="r1",
+        verdict="adjusted",
+        final_selected=[jt],
+        adjustments=[adj],
+        overall_confidence="HIGH",
+    )
+    assert out.verdict == "adjusted"
+    assert out.final_selected[0].source == "judge"
+    assert out.adjustments[0].reason_code == "confidence_upgrade"
+
+    # Legacy judged_articles still works
     judged = JudgedArticle(article=article, approved=True, reason="On topic")
-    out = Phase1JudgeOutput(run_id="r1", judged_articles=[judged])
-    assert out.judged_articles[0].approved is True
+    legacy = Phase1JudgeOutput(run_id="r1", judged_articles=[judged])
+    assert legacy.judged_articles[0].approved is True
 
 
 # ── Summarizer ────────────────────────────────────────────────────────────────
