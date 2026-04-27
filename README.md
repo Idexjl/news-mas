@@ -47,9 +47,9 @@ All agents share:
 | `registry` | 8000 | — | Stores and serves `AgentConfig`; seeds defaults on startup |
 | `search_worker` | 8001 | Tavily | Fetches raw articles per topic |
 | `heat_scorer` | 8002 | Gemma 4 (Ollama) | Scores articles 0.0–1.0: volume × velocity × novelty × significance |
-| `filter_agent` | 8003 | — | Drops articles below `min_heat_score` |
-| `selector` | 8004 | — | Picks top-K by heat score |
-| `phase1_judge` | 8005 | Gemma 4 (Ollama) | Holistic approve/reject over the shortlist |
+| `filter_agent` | 8003 | Gemma 4 (Ollama) | Semantic constraint filtering — drops articles that violate user-defined intent constraints |
+| `selector` | 8004 | Gemma 4 (Ollama) | Holistic topic selection with diversity enforcement; ranks by heat score, source confidence, and category diversity |
+| `phase1_judge` | 8005 | Gemma 4 (Ollama) | Single-pass independent review: ENDORSE or ADJUST selector choices |
 | `summarizer` | 8006 | Claude Sonnet | Generates summary + key points for one article |
 | `reviewer` | 8007 | Claude Sonnet | Evaluates summary quality; approve or request revision |
 | `relevance_gate` | 8008 | Gemma 4 (Ollama) | Scores digest relevance; gates final inclusion |
@@ -205,6 +205,9 @@ Unit test coverage:
 | `test_langsmith_config.py` | LangSmith tag/metadata configuration |
 | `tests/integration/test_heat_scorer_live.py` | Live Gemma 4 scoring, OTel spans, LangSmith config |
 | `tests/integration/test_search_worker_live.py` | Live Tavily search |
+| `tests/integration/test_filter_agent_live.py` | Live semantic constraint filtering via Gemma 4 |
+| `tests/integration/test_selector_live.py` | Live holistic topic selection with diversity enforcement |
+| `tests/integration/test_phase1_judge_live.py` | Live Phase1Judge ENDORSE/ADJUST verdict |
 
 ---
 
@@ -221,6 +224,8 @@ news-mas/
 │   └── alerts.yml
 ├── prompts/
 │   ├── heat_scorer/v1.0.yaml
+│   ├── filter_agent/v1.0.yaml
+│   ├── selector/v1.0.yaml
 │   └── phase1_judge/v1.0.yaml
 ├── scripts/
 │   └── generate_key.py

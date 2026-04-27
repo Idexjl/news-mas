@@ -465,18 +465,26 @@ async def _traced_run(inp: SearchWorkerInput, *, tracer: Any = None) -> SearchWo
     )
 
     articles: list[SearchResult] = []
+    connection_errors: list[str] = []
     for topic, result in zip(inp.topics, topic_results):
         if isinstance(result, BaseException):
+            error_type = type(result).__name__
             logger.error(
                 "topic_search_failed",
                 extra={
                     "topic": topic,
-                    "error_type": type(result).__name__,
+                    "error_type": error_type,
                     "run_id": inp.run_id,
                 },
             )
+            if isinstance(result, (ConnectionError, OSError)):
+                connection_errors.append(error_type)
         else:
             articles.extend(result)
+
+    warnings: list[str] = []
+    if connection_errors and not articles:
+        warnings.append(f"tavily_connection_error:{','.join(connection_errors)}")
 
     # Rough token estimate (4 chars ≈ 1 token) for LangSmith metadata.
     token_estimate = sum(len(a.content) for a in articles) // 4
@@ -489,7 +497,7 @@ async def _traced_run(inp: SearchWorkerInput, *, tracer: Any = None) -> SearchWo
         },
     )
 
-    return SearchWorkerOutput(run_id=inp.run_id, articles=articles)
+    return SearchWorkerOutput(run_id=inp.run_id, articles=articles, warnings=warnings)
 
 
 # ── public entry point ────────────────────────────────────────────────────────

@@ -317,6 +317,36 @@ class RunState(BaseModel):
     metrics: dict = Field(default_factory=dict)
 
 
+# ── Orchestrator inputs / outputs ────────────────────────────────────────────
+
+class TopicInput(BaseModel):
+    """User-defined topic for one pipeline run. topic_text is never logged."""
+    topic_id: str
+    topic_text: str  # search query — never logged or recorded in spans
+    constraints: list[str] = Field(default_factory=list)
+
+
+class RankedCandidate(BaseModel):
+    """Final ranked output entry from Phase 1 (real topic or tombstone)."""
+    topic_id: str
+    rank: int
+    source: Literal["selector", "judge"] = "selector"
+    confidence: Literal["HIGH", "MEDIUM", "LOW"] = "LOW"
+    judged_articles: list["JudgedArticle"] = Field(default_factory=list)
+    is_tombstone: bool = False
+    tombstone_reason: Optional[str] = None
+
+
+class Phase1Output(BaseModel):
+    """Result envelope returned by the Phase 1 orchestrator runner."""
+    run_id: str
+    ranked_candidates: list[RankedCandidate]
+    errors: list = Field(default_factory=list)  # list[PipelineError] — avoids circular import
+    run_status: str
+    total_tokens_used: int = 0
+    judged_articles: list["JudgedArticle"] = Field(default_factory=list)
+
+
 # ── Agent registry ────────────────────────────────────────────────────────────
 
 class WorkloadIdentityInfo(BaseModel):

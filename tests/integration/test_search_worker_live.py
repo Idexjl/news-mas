@@ -70,6 +70,12 @@ async def test_live_search_returns_scrubbed_articles(span_tracer):
     output = await run_agent(inp, tracer=tracer)
 
     assert output.run_id == "integration-test-01"
+
+    if not output.articles and any(
+        w.startswith("tavily_connection_error") for w in (output.warnings or [])
+    ):
+        pytest.skip("Tavily API unreachable — skipping rather than failing")
+
     assert len(output.articles) > 0, "Expected at least one article from Tavily"
 
     for article in output.articles:

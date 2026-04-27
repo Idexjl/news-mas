@@ -37,3 +37,6 @@ SCORE_OUT_OF_RANGE = "SCORE_OUT_OF_RANGE"
 # ── Infrastructure ────────────────────────────────────────────────────────────
 REGISTRY_UNAVAILABLE = "REGISTRY_UNAVAILABLE"
 AUTH_FAILED = "AUTH_FAILED"
+
+# ── Orchestrator ──────────────────────────────────────────────────────────────
+CIRCUIT_BREAKER_ACTIVE = "CIRCUIT_BREAKER_ACTIVE"

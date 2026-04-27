@@ -37,7 +37,10 @@ dependencies = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
-markers = ["integration: marks tests as integration tests requiring external services"]
+markers = [
+    "integration: marks tests as integration tests requiring external services",
+    "slow: marks tests as slow running (>30s)",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
