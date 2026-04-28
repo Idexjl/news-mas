@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from typing import Annotated, Any, Optional, TypedDict
 
 from dotenv import load_dotenv
-from langgraph.constants import Send
+from langgraph.types import Send
 from langgraph.graph import END, StateGraph
 
 from src.auth.token_service import exchange_token, mint_token
