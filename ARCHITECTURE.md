@@ -302,10 +302,33 @@ shortlist reaches Phase 2).
 
 ### Swapping models — `MODEL_OVERRIDE`
 
-Set `MODEL_OVERRIDE` in `.env` to override the model for all LLM calls globally (e.g.
-`MODEL_OVERRIDE=claude-opus-4-7` to test with a more powerful model, or a Gemma variant
-string to redirect Anthropic-backed agents to local inference). Leave blank to use the
-per-agent defaults above.
+Set `MODEL_OVERRIDE` in `.env` to override the model for all LLM calls globally. The
+override is resolved by `resolve_model()` in `src/common/agent_bootstrap.py`, which is
+called inside each affected agent's `run_agent()` entry point.
+
+**Exempt agents:** `summarizer` and `reviewer` always use their registry-configured model
+regardless of `MODEL_OVERRIDE` — their output is user-facing prose where model quality
+is fixed by product requirements, not development convenience.
+
+**Affected agents:** `heat_scorer`, `filter_agent`, `selector`, `phase1_judge`, and
+`relevance_gate` (when built).
+
+**Provider routing:** `resolve_model()` returns a `(provider, model_id)` tuple. Each
+affected agent dispatches LLM calls to either `_call_ollama()` or `_call_anthropic()`
+based on the resolved provider. Both are LangSmith-traced with `@traceable`.
+
+**Known override values and their mappings:**
+
+| `MODEL_OVERRIDE` value | Provider | Resolved model ID |
+|---|---|---|
+| `claude-haiku` | `anthropic` | `claude-haiku-4-5-20251001` |
+| `claude-haiku-4-5-20251001` | `anthropic` | `claude-haiku-4-5-20251001` |
+| `claude-sonnet` | `anthropic` | `claude-sonnet-4-6` |
+| `gemma4:e4b` | `ollama` | `gemma4:e4b` |
+| Any other `claude-*` string | `anthropic` | the string as-is |
+| Any other string | `ollama` | the string as-is |
+
+Leave `MODEL_OVERRIDE` blank (or unset) to use per-agent registry defaults.
 
 ---
 

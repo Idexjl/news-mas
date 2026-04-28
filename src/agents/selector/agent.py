@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Optional
 
 from dotenv import load_dotenv
@@ -56,6 +57,12 @@ except ImportError:
     _ollama = None  # type: ignore[assignment]
     _OllamaResponseError = Exception  # type: ignore[assignment,misc]
 
+try:
+    import anthropic as _anthropic
+except ImportError:
+    _anthropic = None  # type: ignore[assignment]
+
+from src.common.agent_bootstrap import resolve_model
 from src.auth.token_service import validate_token
 from src.common.data_quality import DataQualityValidator
 from src.common.error_codes import (
@@ -201,7 +208,7 @@ def _build_topics_payload(
     return "\n".join(lines)
 
 
-# ── LangSmith-traced LLM call ──────────────────────────────────────────────────
+# ── LangSmith-traced LLM calls ────────────────────────────────────────────────
 
 @_ls_traceable(
     run_type="llm",
@@ -235,6 +242,35 @@ async def _call_ollama(
     return dict(response)
 
 
+@_ls_traceable(
+    run_type="llm",
+    name="selector-anthropic",
+    tags=["selector", "anthropic", "cloud"],
+    metadata={"provider": "anthropic"},
+)
+async def _call_anthropic(
+    prompt: str,
+    system: str,
+    run_id: str,
+    *,
+    model_id: str,
+) -> dict[str, Any]:
+    """LangSmith-traced Anthropic inference call. Returns Ollama-compatible shape."""
+    if _anthropic is None:
+        raise RuntimeError("anthropic package is not installed")
+    async with _anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY")) as client:
+        message = await client.messages.create(
+            model=model_id,
+            max_tokens=2048,
+            system=system,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    text = message.content[0].text if message.content else ""
+    text = re.sub(r"^```(?:json)?\s*\n?", "", text.strip())
+    text = re.sub(r"\n?```\s*$", "", text.strip())
+    return {"message": {"content": text.strip()}}
+
+
 # ── LangSmith-traced selection run ────────────────────────────────────────────
 
 @_ls_traceable(
@@ -246,6 +282,7 @@ async def _traced_run(
     inp: SelectorInput,
     *,
     model_id: str,
+    provider: str,
     prompt_version: str,
     tracer: Any,
 ) -> SelectorOutput:
@@ -354,12 +391,14 @@ async def _traced_run(
                 llm_span.set_attribute("attempt", attempt)
 
                 try:
-                    ollama_resp = await _call_ollama(
-                        user_prompt,
-                        system_prompt,
-                        inp.run_id,
-                        model_id=model_id,
-                    )
+                    if provider == "anthropic":
+                        ollama_resp = await _call_anthropic(
+                            user_prompt, system_prompt, inp.run_id, model_id=model_id,
+                        )
+                    else:
+                        ollama_resp = await _call_ollama(
+                            user_prompt, system_prompt, inp.run_id, model_id=model_id,
+                        )
                     # Successful call — break out of retry loop after parsing below
                     break
 
@@ -429,9 +468,9 @@ async def _traced_run(
                         severity=ErrorSeverity.FATAL,
                         agent_id=_AGENT_ID,
                         run_id=inp.run_id,
-                        message="Unexpected error calling Ollama",
-                        retry_hint="Check Ollama connectivity and model availability",
-                        context={"error_type": type(exc).__name__},
+                        message="Unexpected error calling LLM",
+                        retry_hint="Check LLM backend connectivity and model availability",
+                        context={"error_type": type(exc).__name__, "provider": provider},
                     )
                     record_span_error(llm_span, last_error)
                     record_span_error(select_span, last_error)
@@ -578,12 +617,12 @@ async def run_agent(
     *,
     tracer: Any = None,
     model_id: str | None = None,
+    model_provider: str | None = None,
 ) -> SelectorOutput:
     """
-    Public entry point. ``model_id`` is optional — main.py injects it from
-    AgentConfig; callers that omit it get MODEL_OVERRIDE or the default model.
-    ``tracer`` is optional; pass a test-scoped tracer to capture spans without
-    touching the global OTel provider.
+    Public entry point. ``model_id`` and ``model_provider`` are optional —
+    main.py injects them from AgentConfig. MODEL_OVERRIDE is applied via
+    resolve_model(); summarizer and reviewer are exempt.
     """
     load_dotenv()
     setup_telemetry("news-mas-selector")
@@ -597,11 +636,10 @@ async def run_agent(
     active_tracer = tracer if tracer is not None else get_tracer("selector")
 
     prompt_version = _PROMPT_VERSION
-    _override = os.getenv("MODEL_OVERRIDE", "").strip()
-    effective_model = (
-        model_id
-        or (_override if _override and not _override.startswith("#") else None)
-        or _DEFAULT_MODEL
+    provider, effective_model = resolve_model(
+        model_id or _DEFAULT_MODEL,
+        model_provider or "ollama",
+        _AGENT_ID,
     )
 
     make_run_config("selector", prompt_version, run_id=inp.run_id)
@@ -642,6 +680,7 @@ async def run_agent(
     return await _traced_run(
         inp,
         model_id=effective_model,
+        provider=provider,
         prompt_version=prompt_version,
         tracer=active_tracer,
     )

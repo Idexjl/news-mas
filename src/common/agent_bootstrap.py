@@ -24,6 +24,14 @@ from src.registry.models import AgentConfig
 
 logger = get_logger(__name__)
 
+_OVERRIDE_MAP: dict[str, tuple[str, str]] = {
+    "claude-haiku": ("anthropic", "claude-haiku-4-5-20251001"),
+    "claude-haiku-4-5-20251001": ("anthropic", "claude-haiku-4-5-20251001"),
+    "claude-sonnet": ("anthropic", "claude-sonnet-4-6"),
+    "gemma4:e4b": ("ollama", "gemma4:e4b"),
+}
+_OVERRIDE_EXEMPT = frozenset({"summarizer", "reviewer"})
+
 
 async def bootstrap_agent(
     registry_url: str,
@@ -102,3 +110,39 @@ async def bootstrap_agent(
         },
     )
     return config
+
+
+def resolve_model(
+    registry_model_id: str,
+    registry_provider: str,
+    agent_id: str,
+) -> tuple[str, str]:
+    """
+    Returns (provider, model_id) after applying MODEL_OVERRIDE if set.
+
+    Summarizer and reviewer are exempt from override — they always use their
+    registry config.
+    """
+    if agent_id in _OVERRIDE_EXEMPT:
+        return registry_provider, registry_model_id
+
+    override = os.getenv("MODEL_OVERRIDE", "").strip()
+    if not override or override.startswith("#"):
+        return registry_provider, registry_model_id
+
+    if override in _OVERRIDE_MAP:
+        provider, model_id = _OVERRIDE_MAP[override]
+    else:
+        provider = "anthropic" if "claude" in override else "ollama"
+        model_id = override
+
+    logger.warning(
+        "model.override.active",
+        extra={
+            "agent_id": agent_id,
+            "registry_model": registry_model_id,
+            "override_model": model_id,
+            "override_provider": provider,
+        },
+    )
+    return provider, model_id

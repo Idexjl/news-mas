@@ -89,4 +89,5 @@ async def run(request: Request, payload: SelectorInput):
     logger.info("run requested", extra={"run_id": payload.run_id})
     config = getattr(request.app.state, "agent_config", None)
     model_id = config.model_id if config else None
-    return await run_agent(payload, model_id=model_id)
+    model_provider = config.model_provider if config else None
+    return await run_agent(payload, model_id=model_id, model_provider=model_provider)

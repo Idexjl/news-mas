@@ -98,8 +98,9 @@ async def test_live_heat_scorer_four_signals_present(span_tracer):
     """Verifies all four signal components are returned — uses a direct JSON parse."""
     tracer, _ = span_tracer
     import json
-    import ollama as _ollama
+    from src.common.agent_bootstrap import resolve_model
     from src.common.prompt_loader import get_system_prompt, load_prompt
+    from src.agents.heat_scorer.agent import _call_anthropic, _call_ollama
 
     prompt_data = load_prompt("heat_scorer", "v1.0")
     system_prompt = get_system_prompt("heat_scorer", "v1.0")
@@ -118,20 +119,12 @@ async def test_live_heat_scorer_four_signals_present(span_tracer):
         )[:500],
     )
 
-    _override = os.getenv("MODEL_OVERRIDE", "").strip()
-    _model = (_override if _override and not _override.startswith("#") else None) or "gemma4:e4b"
+    provider, model_id = resolve_model("gemma4:e4b", "ollama", "heat-scorer")
+    if provider == "anthropic":
+        response = await _call_anthropic(user_prompt, system_prompt, "", "test-four-signals", model_id=model_id)
+    else:
+        response = await _call_ollama(user_prompt, system_prompt, "", "test-four-signals", model_id=model_id)
 
-    client = _ollama.AsyncClient(
-        host=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    )
-    response = await client.chat(
-        model=_model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        format="json",
-    )
     parsed = json.loads(response["message"]["content"])
 
     assert "heat_score" in parsed, "heat_score missing from response"

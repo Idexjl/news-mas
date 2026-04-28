@@ -4,7 +4,7 @@ import logging
 from typing import Any
 
 from presidio_analyzer import AnalyzerEngine, RecognizerResult
-from presidio_analyzer.nlp_engine import NlpEngineProvider
+from presidio_analyzer.nlp_engine import NerModelConfiguration, NlpEngineProvider, SpacyNlpEngine
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
@@ -43,19 +43,22 @@ _anonymizer: AnonymizerEngine | None = None
 # hasn't been downloaded yet.
 _SPACY_MODELS = ("en_core_web_lg", "en_core_web_md", "en_core_web_sm")
 
+# spaCy NER types that have no Presidio PII mapping — suppress the warning.
+_NER_LABELS_TO_IGNORE = [
+    "CARDINAL", "EVENT", "FAC", "LANGUAGE", "LAW",
+    "MONEY", "ORDINAL", "PERCENT", "PRODUCT", "QUANTITY", "WORK_OF_ART",
+]
+
 
 def _build_analyzer() -> AnalyzerEngine:
+    ner_model_config = NerModelConfiguration(labels_to_ignore=_NER_LABELS_TO_IGNORE)
     for model_name in _SPACY_MODELS:
         try:
-            cfg = {
-                "nlp_engine_name": "spacy",
-                "models": [{"lang_code": "en", "model_name": model_name}],
-            }
-            nlp_engine = NlpEngineProvider(nlp_configuration=cfg).create_engine()
-            return AnalyzerEngine(
-                nlp_engine=nlp_engine,
-                supported_languages=["en"],
+            nlp_engine = SpacyNlpEngine(
+                models=[{"lang_code": "en", "model_name": model_name}],
+                ner_model_configuration=ner_model_config,
             )
+            return AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
         except Exception:
             continue
     # Last resort: let Presidio try its own default (requires en_core_web_lg)
