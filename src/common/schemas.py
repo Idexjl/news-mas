@@ -273,18 +273,35 @@ class SummarizerOutput(AgentResult):
 
 # ── Reviewer ──────────────────────────────────────────────────────────────────
 
+class ReviewIssue(BaseModel):
+    """A single quality issue found by the reviewer."""
+    type: Literal["citation_mismatch", "constraint_violated", "thin_content", "phi_detected"]
+    description: str
+    suggestion: str = ""
+
+
 class ReviewerInput(BaseModel):
     run_id: str
     article: RawArticle
     summary: str
     key_points: list[str]
+    citations: list[Citation] = Field(default_factory=list)
+    sources: list[SearchResult] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    topic_text: Optional[str] = None
+    retry_count: int = 0
+    aap_token: Optional[str] = None
 
 
 class ReviewerOutput(AgentResult):
     run_id: str
-    approved: bool = False
-    revised_summary: Optional[str] = None
-    feedback: str = ""
+    approved: bool = False          # True when verdict == "pass"
+    verdict: Literal["pass", "fail"] = "pass"
+    confidence: Optional[Literal["HIGH", "MEDIUM", "LOW"]] = None
+    endorsement_note: Optional[str] = None
+    issues: list[ReviewIssue] = Field(default_factory=list)
+    feedback: str = ""              # consolidated feedback_for_summarizer (set on FAIL)
+    revised_summary: Optional[str] = None  # backward-compat; always None from reviewer
 
 
 # ── Relevance Gate ────────────────────────────────────────────────────────────

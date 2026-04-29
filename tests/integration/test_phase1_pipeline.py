@@ -34,8 +34,25 @@ TOPICS = [
 
 
 @pytest.fixture()
-def run_id() -> str:
-    return f"integ-phase1-{uuid.uuid4().hex[:8]}"
+def run_id():
+    """Unique run_id per test. Cleans up any leftover 'running' state after the test
+    so a crashed pipeline cannot block subsequent tests via the circuit breaker."""
+    rid = f"integ-phase1-{uuid.uuid4().hex[:8]}"
+    yield rid
+    fernet_key = os.getenv("FERNET_KEY")
+    if not fernet_key:
+        return
+    try:
+        from src.common.storage import FernetStorage, RunRepository
+        repo = RunRepository(FernetStorage())
+        try:
+            existing = repo.load(rid)
+            if existing.get("status") == "running":
+                repo.save(rid, {**existing, "status": "aborted"})
+        except (KeyError, Exception):
+            pass
+    except Exception:
+        pass
 
 
 @pytest.mark.asyncio

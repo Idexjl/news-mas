@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-_STALE_THRESHOLD_MINUTES = 30
+_STALE_THRESHOLD_MINUTES = 5
 
 
 @pytest.fixture(scope="session", autouse=True)

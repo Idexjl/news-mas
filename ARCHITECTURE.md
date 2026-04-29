@@ -82,8 +82,17 @@ Summarizer ⇄ Reviewer (retry loop, max 3) → RelevanceGate → Digest
 gates the digest on relevance confidence.
 
 - `Summarizer` generates a cited summary and key points for one article or a topic's source set. Accepts an optional `sources: list[SearchResult]` (multi-source) or falls back to the single `article` field. Uses a hybrid A/B context strategy: direct (single Claude Sonnet call) when the estimated token count is ≤ `TOKEN_BUDGET_SOURCES` (default 16 k), map-reduce (concurrent mini-summarize per source then synthesis) above the threshold. Every factual claim is grounded to a citation URL; hallucinated URLs are rejected with `CITATION_INVALID RETRYABLE`. Output is PHI-checked belt-and-suspenders and rejected with `PHI_DETECTED RETRYABLE` if entities are detected. Retry runs carry a `reviewer_feedback` field; their LangSmith trace is named `summarizer-retry`. Model is hardcoded to `claude-sonnet-4-6` — `MODEL_OVERRIDE` never applies.
-- `Reviewer` evaluates quality. If the summary is rejected and retries remain
-  (`MAX_SUMMARY_RETRIES = 3`), it routes back to `Summarizer` with feedback.
+- `Reviewer` evaluates quality across three dimensions: citation accuracy (URL and
+  quote grounding), constraint compliance (semantic check against user constraints),
+  and content substance (minimum 3 distinct key points). Uses Claude Sonnet. Verdict is
+  `pass` (proceed) or `fail` (retry summarizer with `feedback_for_summarizer`). Calibrated
+  to pass useful summaries even if imperfect — only fails for meaningful quality problems.
+  PHI belt-and-suspenders check runs before the LLM call; PHI auto-fails without an LLM
+  round-trip. Empty summaries and missing citations are caught pre-flight. No-sources
+  input runs in DEGRADED mode (citation check skipped). Reviewer unavailability degrades
+  to a `pass` with warning so the pipeline never stalls on a reviewer outage.
+  If the summary is rejected and retries remain (`MAX_SUMMARY_RETRIES = 3`), it routes
+  back to `Summarizer` with `feedback_for_summarizer`.
 - `RelevanceGate` assigns a relevance confidence score. Low-confidence articles are
   excluded from the final digest.
 
