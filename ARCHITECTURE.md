@@ -81,7 +81,7 @@ Summarizer ⇄ Reviewer (retry loop, max 3) → RelevanceGate → Digest
 **What it does:** Produces a quality-checked summary for each approved article, then
 gates the digest on relevance confidence.
 
-- `Summarizer` generates a summary and key points for a single article.
+- `Summarizer` generates a cited summary and key points for one article or a topic's source set. Accepts an optional `sources: list[SearchResult]` (multi-source) or falls back to the single `article` field. Uses a hybrid A/B context strategy: direct (single Claude Sonnet call) when the estimated token count is ≤ `TOKEN_BUDGET_SOURCES` (default 16 k), map-reduce (concurrent mini-summarize per source then synthesis) above the threshold. Every factual claim is grounded to a citation URL; hallucinated URLs are rejected with `CITATION_INVALID RETRYABLE`. Output is PHI-checked belt-and-suspenders and rejected with `PHI_DETECTED RETRYABLE` if entities are detected. Retry runs carry a `reviewer_feedback` field; their LangSmith trace is named `summarizer-retry`. Model is hardcoded to `claude-sonnet-4-6` — `MODEL_OVERRIDE` never applies.
 - `Reviewer` evaluates quality. If the summary is rejected and retries remain
   (`MAX_SUMMARY_RETRIES = 3`), it routes back to `Summarizer` with feedback.
 - `RelevanceGate` assigns a relevance confidence score. Low-confidence articles are
@@ -501,9 +501,19 @@ Phase 1 agents (scoring, filtering, judging) operate on structured metadata fiel
 context for these agents — they reason from the signals, not the text.
 
 Phase 2 agents (summarizer, reviewer) receive the full article content in context,
-because they are producing prose from it. The summarizer's input is a single article;
-the reviewer's input is the article + the summary under evaluation. This keeps each
-context window focused on one article at a time.
+because they are producing prose from it. The summarizer accepts a list of
+`SearchResult` sources (one per approved article for a topic) or falls back to a
+single `RawArticle`. The reviewer's input is the article + the summary under
+evaluation.
+
+The summarizer uses a two-tier context strategy controlled by `TOKEN_BUDGET_SOURCES`
+(default 16 000 tokens):
+- **Direct (Option A):** total estimated tokens ≤ budget → single Claude Sonnet call
+  with all sources in context.
+- **Map-reduce (Option B):** exceeds budget → each source is mini-summarized
+  concurrently (max 150 words each, max 512 tokens), then a synthesis call combines
+  the mini-summaries. Original source URLs are pinned through the mini-step so
+  citations in the final output always reference the original articles.
 
 ### Option C — Deferred
 

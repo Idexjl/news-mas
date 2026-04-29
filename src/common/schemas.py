@@ -244,15 +244,31 @@ class Phase1JudgeOutput(AgentResult):
 
 # ── Summarizer ────────────────────────────────────────────────────────────────
 
+class Citation(BaseModel):
+    """A single cited source in a summarizer output."""
+    index: int
+    url: str
+    title: str
+    quote: str = ""  # verbatim excerpt, under 15 words
+
+
 class SummarizerInput(BaseModel):
     run_id: str
     article: RawArticle
+    sources: list[SearchResult] = Field(default_factory=list)
+    topic_text: Optional[str] = None
+    reviewer_feedback: Optional[str] = None
+    retry_count: int = 0
+    aap_token: Optional[str] = None
 
 
 class SummarizerOutput(AgentResult):
     run_id: str
     summary: str = ""
     key_points: list[str] = Field(default_factory=list)
+    citations: list[Citation] = Field(default_factory=list)
+    confidence: Optional[Literal["HIGH", "MEDIUM", "LOW"]] = None
+    topic_text: str = ""
 
 
 # ── Reviewer ──────────────────────────────────────────────────────────────────

@@ -99,6 +99,54 @@ def detect_pii(text: str, language: str = "en") -> list[dict[str, Any]]:
     return detections
 
 
+# Entity types that would never legitimately appear in news summaries.
+# Used for belt-and-suspenders checks on LLM output — intentionally narrow
+# so that researcher names (PERSON) and institutions (LOCATION) in news prose
+# do not generate false positives.
+_PHI_OUTPUT_ENTITIES: list[str] = [
+    "US_SSN",
+    "UK_NHS",
+    "MEDICAL_LICENSE",
+    "CREDIT_CARD",
+    "IBAN_CODE",
+    "US_BANK_NUMBER",
+    "US_PASSPORT",
+    "US_ITIN",
+    "US_DRIVER_LICENSE",
+]
+_PHI_OUTPUT_MIN_SCORE: float = 0.7  # only high-confidence detections trigger output rejection
+
+
+def detect_phi_in_output(text: str, language: str = "en") -> list[dict[str, Any]]:
+    """
+    Restricted PHI check for LLM-generated output (belt-and-suspenders).
+
+    Uses a narrow entity set (identifiers that cannot appear in legitimate
+    news summaries) and a higher confidence threshold than the input scrubber.
+    This avoids false positives on researcher names, institutions, and dates
+    that naturally appear in news prose.
+
+    Returns a list of high-confidence detections. Entity counts are logged;
+    content is never logged.
+    """
+    analyzer, _ = _get_engines()
+    results = analyzer.analyze(
+        text=text,
+        entities=_PHI_OUTPUT_ENTITIES,
+        language=language,
+    )
+    high_conf = [r for r in results if r.score >= _PHI_OUTPUT_MIN_SCORE]
+    if high_conf:
+        type_counts: dict[str, int] = {}
+        for r in high_conf:
+            type_counts[r.entity_type] = type_counts.get(r.entity_type, 0) + 1
+        logger.info("PHI detected in LLM output", extra={"entity_counts": type_counts})
+    return [
+        {"type": r.entity_type, "start": r.start, "end": r.end, "score": r.score}
+        for r in high_conf
+    ]
+
+
 def scrub_text(text: str, language: str = "en") -> str:
     """
     Anonymise all detected PII/PHI in *text* by replacing each span with
