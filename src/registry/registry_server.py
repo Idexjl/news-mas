@@ -143,8 +143,8 @@ _DEFAULTS: list[AgentConfig] = [
     ),
     AgentConfig(
         agent_id="relevance-gate",
-        model_provider="ollama",
-        model_id="gemma4:e4b",
+        model_provider="anthropic",
+        model_id="claude-haiku-4-5-20251001",
         capabilities=["gate.relevance"],
         token_budget=4096,
         prompt_version="v1.0",

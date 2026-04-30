@@ -4,6 +4,7 @@ import pytest
 
 from src.common.schemas import (
     DigestEntry,
+    DigestTombstone,
     FilterAgentInput,
     FilterAgentOutput,
     HeatScorerInput,
@@ -173,10 +174,41 @@ def test_reviewer_with_revision(article):
 
 # ── RelevanceGate ─────────────────────────────────────────────────────────────
 
-def test_relevance_gate_io(article):
-    inp = RelevanceGateInput(run_id="r1", article=article, summary="S")
-    out = RelevanceGateOutput(run_id="r1", is_relevant=True, confidence=0.92, reason="On topic")
-    assert 0.0 <= out.confidence <= 1.0
+def test_relevance_gate_io():
+    inp = RelevanceGateInput(
+        run_id="r1",
+        topic_id="topic-1",
+        topic_text="quantum computing",
+        heat_score=0.7,
+        overall_confidence="HIGH",
+        reviewer_verdict="pass",
+    )
+    assert inp.budget_exhausted is False
+    assert inp.retry_count == 0
+
+    out = RelevanceGateOutput(run_id="r1", decision="pass", gate_path="fast_pass")
+    assert out.decision == "pass"
+    assert out.tombstone is None
+
+
+def test_relevance_gate_tombstone_output():
+    stone = DigestTombstone(
+        topic_id="topic-1",
+        topic_display_name="Quantum Computing",
+        tombstone_message="Limited news activity this week.",
+        heat_score=0.15,
+        confidence="LOW",
+        reason_code="too_cold",
+    )
+    out = RelevanceGateOutput(
+        run_id="r1",
+        decision="tombstone",
+        gate_path="fast_tombstone",
+        tombstone=stone,
+    )
+    assert out.decision == "tombstone"
+    assert out.tombstone is not None
+    assert out.tombstone.reason_code == "too_cold"
 
 
 # ── DigestEntry ───────────────────────────────────────────────────────────────

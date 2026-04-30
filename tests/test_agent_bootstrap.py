@@ -263,8 +263,8 @@ async def test_correct_model_assignments(registry_client):
     assert configs["summarizer"]["model_id"] == "claude-sonnet-4-6"
     assert configs["reviewer"]["model_provider"] == "anthropic"
     assert configs["reviewer"]["model_id"] == "claude-sonnet-4-6"
-    assert configs["relevance-gate"]["model_provider"] == "ollama"
-    assert configs["relevance-gate"]["model_id"] == "gemma4:e4b"
+    assert configs["relevance-gate"]["model_provider"] == "anthropic"
+    assert configs["relevance-gate"]["model_id"] == "claude-haiku-4-5-20251001"
 
 
 @pytest.mark.asyncio

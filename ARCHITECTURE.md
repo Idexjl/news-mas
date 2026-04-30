@@ -93,8 +93,14 @@ gates the digest on relevance confidence.
   to a `pass` with warning so the pipeline never stalls on a reviewer outage.
   If the summary is rejected and retries remain (`MAX_SUMMARY_RETRIES = 3`), it routes
   back to `Summarizer` with `feedback_for_summarizer`.
-- `RelevanceGate` assigns a relevance confidence score. Low-confidence articles are
-  excluded from the final digest.
+- `RelevanceGate` makes the final pass/tombstone decision for each topic. It sees the
+  full picture: heat score, source confidence, reviewer verdict, retry count, and budget
+  exhaustion status. Deterministic fast paths handle obvious cases (very hot + high
+  confidence → pass; very cold or budget exhausted → tombstone) without an LLM call.
+  Borderline cases are sent to Claude Haiku for a binary decision. LLM unavailability
+  degrades to pass so uncertain topics reach the digest rather than being silently dropped.
+  Tombstoned topics receive a `DigestTombstone` with a user-friendly explanation.
+  `MODEL_OVERRIDE` applies.
 
 **Why the retry loop is capped:** Uncapped retries would stall the pipeline on a single
 bad article. Three attempts is enough to catch transient LLM variance; hard failures
@@ -123,7 +129,7 @@ All agents expose `GET /health` (no auth) and `POST /run` (auth required). Rate 
 | `phase1_judge` | 8005 | 1 | ollama | `gemma4:e4b` | Independent single-pass review: ENDORSE or ADJUST selector choices |
 | `summarizer` | 8006 | 2 | anthropic | `claude-sonnet-4-6` | Generate summary + key points for one article |
 | `reviewer` | 8007 | 2 | anthropic | `claude-sonnet-4-6` | Evaluate summary quality; approve or request revision |
-| `relevance_gate` | 8008 | 2 | ollama | `gemma4:e4b` | Score digest relevance confidence; gate final inclusion |
+| `relevance_gate` | 8008 | 2 | anthropic | `claude-haiku-4-5-20251001` | Final pass/tombstone gate; deterministic fast paths + LLM for borderline calls |
 
 †`filter_agent` and `selector` use Gemma 4 via Ollama for their respective reasoning tasks — semantic constraint filtering and holistic topic selection — even though their registry entries still show `model_provider: none` (a registry metadata lag from when they were planned as deterministic; both agents load `gemma4:e4b` directly and respect `MODEL_OVERRIDE`).
 
@@ -295,11 +301,19 @@ the specific agent key that minted or received it.
 
 ### Reasoning agents — Gemma 4 (local via Ollama)
 
-`heat_scorer`, `phase1_judge`, and `relevance_gate` use Gemma 4 served locally by
-Ollama (`OLLAMA_BASE_URL=http://localhost:11434`). These agents perform structured
-scoring and classification tasks — they produce JSON with numeric scores and short
-rationale strings. Local inference eliminates per-call API costs for the highest-volume
-part of the pipeline (every candidate article passes through all three).
+`heat_scorer` and `phase1_judge` use Gemma 4 served locally by Ollama
+(`OLLAMA_BASE_URL=http://localhost:11434`). These agents perform structured scoring and
+classification tasks — they produce JSON with numeric scores and short rationale strings.
+Local inference eliminates per-call API costs for the highest-volume part of the pipeline
+(every candidate article passes through both).
+
+### Gate agent — Claude Haiku (Anthropic API)
+
+`relevance_gate` uses Claude Haiku (`claude-haiku-4-5-20251001`) via the Anthropic API.
+This is a binary pass/tombstone decision; frontier model quality is not required, but
+the Anthropic API is preferred over Ollama here for reliability and structured JSON output
+consistency. Most decisions are handled by deterministic fast paths (no LLM call); the
+LLM is only invoked for borderline heat/confidence combinations. `MODEL_OVERRIDE` applies.
 
 ### User-facing agents — Claude Sonnet (Anthropic API)
 
@@ -320,7 +334,7 @@ regardless of `MODEL_OVERRIDE` — their output is user-facing prose where model
 is fixed by product requirements, not development convenience.
 
 **Affected agents:** `heat_scorer`, `filter_agent`, `selector`, `phase1_judge`, and
-`relevance_gate` (when built).
+`relevance_gate`.
 
 **Provider routing:** `resolve_model()` returns a `(provider, model_id)` tuple. Each
 affected agent dispatches LLM calls to either `_call_ollama()` or `_call_anthropic()`

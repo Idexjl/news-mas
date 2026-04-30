@@ -41,5 +41,8 @@ AUTH_FAILED = "AUTH_FAILED"
 # ── Reviewer ─────────────────────────────────────────────────────────────────
 REVIEWER_UNAVAILABLE = "REVIEWER_UNAVAILABLE"
 
+# ── Relevance gate ────────────────────────────────────────────────────────────
+GATE_LLM_UNAVAILABLE = "GATE_LLM_UNAVAILABLE"
+
 # ── Orchestrator ──────────────────────────────────────────────────────────────
 CIRCUIT_BREAKER_ACTIVE = "CIRCUIT_BREAKER_ACTIVE"

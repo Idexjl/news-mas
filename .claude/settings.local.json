@@ -29,7 +29,8 @@
       "PowerShell(docker exec otel-collector *)",
       "PowerShell(docker network inspect *)",
       "PowerShell(Invoke-RestMethod -Uri \"http://127.0.0.1:8888/metrics\" | Select-String -Pattern \"exporter.*traces|otlp.*traces|sent_spans|failed_spans\" | Select-Object -First 20)",
-      "Bash(INTEGRATION_TESTS=true python -m pytest tests/integration/test_reviewer_live.py::test_reviewer_unavailable_degraded_pass tests/integration/test_reviewer_live.py::test_phi_in_summary_auto_fails tests/integration/test_reviewer_live.py::test_empty_summary_auto_fails tests/integration/test_reviewer_live.py::test_no_citations_auto_fails tests/integration/test_reviewer_live.py::test_issue_descriptions_not_in_spans tests/integration/test_reviewer_live.py::test_no_content_in_spans -v)"
+      "Bash(INTEGRATION_TESTS=true python -m pytest tests/integration/test_reviewer_live.py::test_reviewer_unavailable_degraded_pass tests/integration/test_reviewer_live.py::test_phi_in_summary_auto_fails tests/integration/test_reviewer_live.py::test_empty_summary_auto_fails tests/integration/test_reviewer_live.py::test_no_citations_auto_fails tests/integration/test_reviewer_live.py::test_issue_descriptions_not_in_spans tests/integration/test_reviewer_live.py::test_no_content_in_spans -v)",
+      "Bash(INTEGRATION_TESTS=true python -m pytest tests/integration/test_relevance_gate_live.py::test_invalid_confidence_defaults_to_low -v)"
     ]
   }
 }

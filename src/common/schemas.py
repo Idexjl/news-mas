@@ -306,17 +306,38 @@ class ReviewerOutput(AgentResult):
 
 # ── Relevance Gate ────────────────────────────────────────────────────────────
 
+class DigestTombstone(BaseModel):
+    """Tombstone card shown to the user when a topic is excluded from the digest."""
+    topic_id: str
+    topic_display_name: str  # from topic_text; safe to display to reader
+    tombstone_message: str   # user-friendly explanation — never log in spans
+    heat_score: float
+    confidence: Literal["HIGH", "MEDIUM", "LOW"]
+    reason_code: Literal[
+        "budget_exhausted", "too_cold", "low_confidence", "gate_decision", "review_failed"
+    ]
+
+
 class RelevanceGateInput(BaseModel):
     run_id: str
-    article: RawArticle
-    summary: str
+    topic_id: str = ""
+    topic_text: str = ""  # user-defined query — never logged or recorded in spans
+    heat_score: float = 0.0
+    overall_confidence: Literal["HIGH", "MEDIUM", "LOW"] = "LOW"
+    reviewer_verdict: Literal["pass", "fail"] = "pass"
+    retry_count: int = 0
+    budget_exhausted: bool = False
+    reviewer_last_feedback: Optional[str] = None
+    tombstone_reason: Optional[str] = None  # set by orchestrator when budget_exhausted=True
+    aap_token: Optional[str] = None  # validated when present; omit in dev/test
 
 
 class RelevanceGateOutput(AgentResult):
     run_id: str
-    is_relevant: bool = False
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
-    reason: str = ""
+    decision: Literal["pass", "tombstone"] = "pass"
+    gate_path: Literal["fast_pass", "fast_tombstone", "llm_decision"] = "fast_pass"
+    tombstone: Optional[DigestTombstone] = None
+    reasoning: Optional[str] = None  # internal LLM reasoning; never shown to user
 
 
 # ── Digest / Run State ────────────────────────────────────────────────────────
