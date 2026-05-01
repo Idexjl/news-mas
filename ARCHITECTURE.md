@@ -112,6 +112,23 @@ a quality loop per item). They have different state shapes, different concurrenc
 patterns, and different failure modes. Splitting them makes each graph's routing logic
 easier to reason about and test independently.
 
+**Phase 2 orchestrator implementation notes:**
+- `src/orchestrators/phase2/graph.py` — LangGraph graph; parallel fan-out via `Send()`,
+  one `process_candidate` node per candidate, each running the full retry loop internally.
+- `src/orchestrators/phase2/runner.py` — `run_phase2(phase1_output, run_id, user_id) → DigestOutput`.
+- `src/orchestrators/pipeline.py` — `run_full_pipeline(topics, since_date, user_id) → DigestOutput`
+  chains Phase 1 → Phase 2.
+- `RankedCandidate` carries `topic_text` and `heat_score` (populated by `finalize_phase1`)
+  so Phase 2 can pass them directly to the summarizer and relevance gate.
+- `DigestEntry` now includes a `citations: list[Citation]` field from the summarizer.
+- `DigestOutput` is the top-level result type returned by both `run_phase2` and `run_full_pipeline`.
+- Token budget: Phase 1 tokens carried in `phase1_tokens_used`; each `process_candidate`
+  pre-checks `phase1_tokens + estimated_candidate_tokens > MAX_TOKENS_PER_RUN` and tombstones
+  without LLM calls if exceeded.
+- Agent calls are direct (`run_agent()` function imports), not HTTP, keeping Phase 2 in-process.
+  HTTP transport applies when agents are deployed as separate FastAPI services (Phase 1 pattern).
+- Digest is persisted to `DigestRepository` and run status to `RunRepository` in `finalize_phase2`.
+
 ---
 
 ## 3. Agent Inventory

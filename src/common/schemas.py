@@ -346,10 +346,28 @@ class DigestEntry(BaseModel):
     article: RawArticle
     summary: str
     key_points: list[str]
+    citations: list[Citation] = Field(default_factory=list)
     heat_score: float
     relevance_confidence: float
     confidence: Optional[Literal["HIGH", "MEDIUM", "LOW"]] = None
     confidence_note: Optional[str] = None
+
+
+class DigestOutput(BaseModel):
+    """Final digest produced by the full Phase 1 + Phase 2 pipeline."""
+    run_id: str
+    user_id: str
+    generated_at: datetime
+    digest_entries: list[DigestEntry] = Field(default_factory=list)
+    tombstones: list[DigestTombstone] = Field(default_factory=list)
+    total_topics: int = 0
+    passed_count: int = 0
+    tombstoned_count: int = 0
+    total_tokens_used: int = 0
+    run_duration_ms: int = 0
+    overall_confidence: Literal["HIGH", "MEDIUM", "LOW"] = "LOW"
+    run_status: str = "complete"
+    errors: list = Field(default_factory=list)
 
 
 class RunStatus(str, Enum):
@@ -389,6 +407,8 @@ class RankedCandidate(BaseModel):
     judged_articles: list["JudgedArticle"] = Field(default_factory=list)
     is_tombstone: bool = False
     tombstone_reason: Optional[str] = None
+    topic_text: str = ""    # populated by finalize_phase1; used by Phase 2 agents
+    heat_score: float = 0.0  # representative topic heat; used by Phase 2 gate
 
 
 class Phase1Output(BaseModel):

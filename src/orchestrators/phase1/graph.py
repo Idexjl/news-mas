@@ -1062,6 +1062,8 @@ async def finalize_phase1(state: Phase1State) -> dict:
                     source=jt.source,
                     confidence=conf,
                     judged_articles=topic_to_articles.get(jt.topic_id, []),
+                    topic_text=cand.topic_text if cand else "",
+                    heat_score=cand.heat_score if cand else 0.0,
                 ))
 
         elif selector_out and selector_out.selected:
@@ -1076,6 +1078,8 @@ async def finalize_phase1(state: Phase1State) -> dict:
                     rank=st.rank,
                     source="selector",
                     confidence=conf,
+                    topic_text=cand.topic_text if cand else "",
+                    heat_score=cand.heat_score if cand else 0.0,
                 ))
 
         # ── Add tombstone entries for failed topics ───────────────────────────
@@ -1083,6 +1087,7 @@ async def finalize_phase1(state: Phase1State) -> dict:
         tombstone_errors = [e for e in existing_errors if e.topic_id and e.topic_id not in selected_ids]
         tombstoned_ids = {e.topic_id for e in tombstone_errors}
 
+        topic_text_map = {t.topic_id: t.topic_text for t in all_topics}
         for err in tombstone_errors:
             if err.topic_id and err.topic_id not in selected_ids:
                 ranked.append(RankedCandidate(
@@ -1090,6 +1095,8 @@ async def finalize_phase1(state: Phase1State) -> dict:
                     rank=len(ranked) + 1,
                     is_tombstone=True,
                     tombstone_reason=err.message,
+                    topic_text=topic_text_map.get(err.topic_id, ""),
+                    heat_score=0.0,
                 ))
 
         # ── Determine final run status ────────────────────────────────────────
