@@ -39,6 +39,11 @@ Eight specialised agents are coordinated by two LangGraph orchestrator graphs. E
 is an independent FastAPI service with its own port, rate limit, and auth middleware.
 The orchestrators call agents over HTTP; agents never call each other directly.
 
+A **Scheduler** service (`src/scheduler/`) triggers pipeline runs on a configurable
+cadence (cron or interval). It runs on port 8010 in the orchestration tier, enforces a
+circuit breaker to prevent double runs, persists run state to Fernet-encrypted storage,
+and exposes a management API for manual triggering and run introspection.
+
 ---
 
 ## 2. Two-Phase MAS Design
@@ -131,6 +136,86 @@ easier to reason about and test independently.
 
 ---
 
+## 2a. Scheduler
+
+**Files:** `src/scheduler/scheduler.py`, `src/scheduler/api.py`
+
+The Scheduler service wraps `run_full_pipeline()` in a configurable trigger loop and
+exposes a management API for manual control.
+
+### Trigger configuration
+
+| Env var | Default | Effect |
+|---|---|---|
+| `SCHEDULE_CRON` | `0 8 * * 1` | Standard cron expression (Monday 08:00) |
+| `SCHEDULE_INTERVAL_HOURS` | *(unset)* | If set, runs every N hours instead of cron |
+| `SCHEDULE_ENABLED` | `true` | Set to `false` to disable automatic runs |
+| `SCHEDULE_TIMEZONE` | `America/Denver` | Timezone for `SCHEDULE_CRON` interpretation |
+
+`AsyncIOScheduler` (APScheduler) holds a single job (`pipeline_trigger`) with
+`max_instances=1`. This prevents APScheduler from spawning a second run if the
+previous one is still in flight. A second, explicit circuit-breaker check at the
+start of `trigger_pipeline_run()` guards against edge cases.
+
+### Run lifecycle
+
+```
+trigger_pipeline_run()                  ← called by APScheduler or /runs/trigger API
+  → circuit_breaker_check               ← skip if any run has status="running"
+  → execute_run(run_id, triggered_by)
+      → save_run(status="running")
+      → topic_repo.get_all_topics()
+      → _run_pipeline_traced()          ← LangSmith parent run
+          → run_full_pipeline()         ← Phase 1 + Phase 2
+      → digest_store.save(digest)
+      → update_status(status="complete")
+      → emit_run_complete_metrics()
+```
+
+On exception: `update_status(status="failed", error=type(e).__name__)`. The
+exception message is never stored or logged — it may contain article content.
+
+### Startup cleanup
+
+On startup, `cleanup_interrupted_runs()` scans for runs with `status="running"`:
+- Started > 2 hours ago → marked `interrupted` (presumed dead from a prior crash)
+- Started recently → logged as warning, status unchanged (may be legitimate)
+
+### Management API (port 8010)
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `GET` | `/health` | none | Scheduler status and next scheduled run time |
+| `POST` | `/runs/trigger` | AAP `schedule.trigger` | Manual pipeline trigger |
+| `GET` | `/runs/status/{run_id}` | none | Single run state |
+| `GET` | `/runs/latest` | none | Most recent run + digest summary |
+| `GET` | `/runs/history` | none | Last N runs (default 10) |
+| `POST` | `/runs/{run_id}/cancel` | AAP `schedule.trigger` | Mark run cancelled |
+
+Auth uses the existing AAP token (HS256, checked for `schedule.trigger` in
+`aap_capabilities`). All endpoints are rate-limited via `slowapi`.
+
+### LangSmith integration
+
+Each triggered run creates a top-level LangSmith trace named
+`"scheduled-pipeline-run"` (via `@traceable`). Phase 1 and Phase 2 child traces
+nest under it automatically through LangSmith context propagation.
+
+### OTel instrumentation
+
+| Signal | Name | Type |
+|---|---|---|
+| Span | `scheduler.trigger` | wraps full execute_run |
+| Span | `scheduler.pipeline` | wraps run_full_pipeline |
+| Span | `scheduler.cleanup` | wraps startup interrupted-run scan |
+| Metric | `mas.scheduler.runs_total` | Counter |
+| Metric | `mas.scheduler.run_duration_ms` | Histogram |
+| Metric | `mas.scheduler.topics_processed` | Counter |
+| Metric | `mas.scheduler.tokens_per_run` | Histogram |
+| Metric | `mas.scheduler.pass_rate` | Histogram (0.0–1.0) |
+
+---
+
 ## 3. Agent Inventory
 
 All agents expose `GET /health` (no auth) and `POST /run` (auth required). Rate limit:
@@ -138,6 +223,7 @@ All agents expose `GET /health` (no auth) and `POST /run` (auth required). Rate 
 
 | Agent | Port | Phase | Model provider | Model ID | Purpose |
 |---|---|---|---|---|---|
+| `scheduler` | 8010 | — | — | — | Triggers pipeline runs on schedule; management API for manual control |
 | `registry` | 8000 | — | — | — | Stores and serves AgentConfig; seeds defaults on startup |
 | `search_worker` | 8001 | 1 | tavily | — | Fetch raw articles from Tavily for each topic |
 | `heat_scorer` | 8002 | 1 | ollama | `gemma4:e4b` | Score articles 0.0–1.0 on volume × velocity × novelty × significance |
@@ -642,6 +728,8 @@ collection-specific method names:
 | `RunRepository` | `data/runs/` | Run state and history (`RunState` schema) |
 | `DigestRepository` | `data/digests/` | Final digest output keyed by `run_id` |
 | `FeedbackRepository` | `data/feedback/` | All feedback signal types (see below) |
+| `TopicRepository` | `data/topics/` | `TopicSubscription` records (active user topic subscriptions) |
+| `SchedulerRunRepository` | `data/scheduler_runs/` | Scheduler run lifecycle records (`SchedulerRunState`) |
 
 ### Feedback signal types
 

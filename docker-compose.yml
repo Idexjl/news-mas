@@ -447,3 +447,40 @@ services:
       - prometheus
       - loki
       - jaeger
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # SCHEDULER — mas-orchestration + mas-observability
+  # Triggers scheduled pipeline runs and exposes a management API on port 8010.
+  # Sits in the orchestration tier so it can initiate Phase 1 + Phase 2 runs.
+  # It is NOT on mas-identity — it does not mint or exchange AAP tokens directly.
+  # ════════════════════════════════════════════════════════════════════════════
+
+  scheduler:
+    # [NETWORK-SEGMENTATION-TODO] The scheduler initiates orchestrator calls
+    # (via run_full_pipeline) and must therefore be in the orchestration tier.
+    # Azure equivalent: App Service or AKS pod in the Orchestration subnet.
+    # NSG inbound: allow port 8010 only from operator IP ranges (management UI).
+    # NSG outbound: same as orchestrators — Compute subnet on agent ports only.
+    profiles: [agents]
+    build:
+      context: .
+      dockerfile: Dockerfile.scheduler
+    container_name: scheduler
+    env_file: .env
+    environment:
+      SERVICE_NAME: news-mas-scheduler
+      SCHEDULE_CRON: ${SCHEDULE_CRON:-0 8 * * 1}
+      SCHEDULE_INTERVAL_HOURS: ${SCHEDULE_INTERVAL_HOURS:-}
+      SCHEDULE_ENABLED: ${SCHEDULE_ENABLED:-true}
+      SCHEDULE_TIMEZONE: ${SCHEDULE_TIMEZONE:-America/Denver}
+    depends_on:
+      - registry
+      - otel-collector
+    networks:
+      - mas-orchestration
+      - mas-observability
+    ports:
+      # Bind to localhost only — management API should not be publicly reachable.
+      # [NETWORK-SEGMENTATION-TODO] In Azure, remove this port mapping and
+      # access the API via an internal load balancer in the Orchestration subnet.
+      - "127.0.0.1:8010:8010"
