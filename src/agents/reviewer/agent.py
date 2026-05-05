@@ -75,7 +75,7 @@ _AGENT_ID = "reviewer"
 _MODEL_ID = "claude-sonnet-4-6"   # hardcoded; never overridden by MODEL_OVERRIDE
 _PROMPT_VERSION = "v1.0"
 _REQUIRED_CAPABILITY = "review.content"
-_MAX_API_RETRIES = 2
+_MAX_API_RETRIES = 3
 _MAX_JSON_RETRIES = 2
 
 logger = get_logger(__name__)
@@ -196,7 +196,12 @@ async def _call_claude(
         except _AnthropicRateLimitError as exc:
             last_exc = exc
             if attempt < _MAX_API_RETRIES:
-                await asyncio.sleep(2 ** attempt)
+                wait = min(2 ** (attempt + 1), 30)  # 2s, 4s, 8s, … capped at 30s
+                logger.warning(
+                    "reviewer.rate_limit_backoff",
+                    extra={"attempt": attempt, "wait_seconds": wait, "run_id": run_id},
+                )
+                await asyncio.sleep(wait)
 
         except _AnthropicAPIError as exc:
             last_exc = exc

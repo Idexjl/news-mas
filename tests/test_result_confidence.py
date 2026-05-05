@@ -133,10 +133,28 @@ def test_candidate_confidence_medium():
 
 
 def test_candidate_confidence_low():
-    results = [_make_result(ResultConfidence.FULL, "https://x.com/0")]
-    results += [_make_result(ResultConfidence.SNIPPET, f"https://y.com/{i}") for i in range(9)]
+    # SCRUBBED articles count toward total but contribute nothing to ratio → LOW
+    results = [_make_result(ResultConfidence.SCRUBBED, f"https://y.com/{i}") for i in range(10)]
     cc = CandidateConfidence.from_results(results, high_threshold=0.7, medium_threshold=0.3)
-    assert cc.confidence_ratio == pytest.approx(0.1)
+    assert cc.confidence_ratio == pytest.approx(0.0)
+    assert cc.overall_confidence == "LOW"
+
+
+def test_candidate_confidence_snippet_floor_at_least_medium():
+    # Snippet-only results (zero successful fetches) are floored to MEDIUM.
+    results = [_make_result(ResultConfidence.SNIPPET, f"https://y.com/{i}") for i in range(10)]
+    cc = CandidateConfidence.from_results(results, high_threshold=0.7, medium_threshold=0.3)
+    assert cc.confidence_ratio == pytest.approx(0.0)
+    assert cc.snippet_only_count == 10
+    assert cc.overall_confidence == "MEDIUM"
+
+
+def test_candidate_confidence_snippet_floor_blocked_by_injection():
+    # Injection override takes priority over snippet floor — result is still LOW.
+    results = [_make_result(ResultConfidence.SNIPPET, f"https://y.com/{i}") for i in range(9)]
+    results.append(_make_result(ResultConfidence.INJECTED, "https://evil.com/0"))
+    cc = CandidateConfidence.from_results(results, high_threshold=0.7, medium_threshold=0.3)
+    assert cc.injection_detected_count == 1
     assert cc.overall_confidence == "LOW"
 
 

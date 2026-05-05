@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Literal
 
+from src.common.observability import configure_langsmith, setup_telemetry
 from src.common.schemas import DigestOutput, DigestTombstone, TopicInput
 from src.orchestrators.phase1.runner import run_phase1
 from src.orchestrators.phase2.runner import run_phase2
@@ -58,6 +59,9 @@ async def run_full_pipeline(
         DigestOutput from Phase 2, or an empty DigestOutput if Phase 1 produced
         no candidates (e.g. no_topics, circuit_breaker_active).
     """
+    configure_langsmith()
+    setup_telemetry("news-mas-pipeline")
+
     if not since_date:
         since_date = datetime.now(timezone.utc).date().isoformat()
 

@@ -29,8 +29,19 @@ Gracefully skipped when FERNET_KEY is not set (local dev without storage).
 
 Token budget
 ------------
-Tracks cumulative token estimates across all agent calls.  When total exceeds
-MAX_TOKENS_PER_RUN the run is aborted with run_status = "budget_exceeded".
+Two separate token buckets:
+
+  content_tokens  — Tavily raw_content and search result bodies.  These are input
+                    tokens paid to external APIs, not LLM output tokens.  Tracked
+                    for observability only; no run-level gate.  Per-topic content
+                    is truncated when it exceeds MAX_CONTENT_TOKENS_PER_TOPIC so
+                    one noisy topic (e.g. cybersecurity with 70k raw tokens) cannot
+                    crowd out the others.
+
+  llm_tokens      — Actual LLM API calls: heat scorer, filter, selector, judge.
+                    Gated by MAX_LLM_TOKENS_PER_RUN (falls back to MAX_TOKENS_PER_RUN).
+                    When this total exceeds the budget the run is aborted with
+                    run_status = "budget_exceeded".
 
 [DPOP-TODO] All agent calls should use DPoP-bound Entra ID tokens once the
 auth layer is active.  See phase2/graph.py [DPOP-TODO] block for the template.
@@ -53,7 +64,7 @@ from src.common.error_codes import (
     CIRCUIT_BREAKER_ACTIVE,
     NO_VIABLE_CANDIDATES,
 )
-from src.common.observability import get_logger, get_tracer, setup_telemetry
+from src.common.observability import configure_langsmith, get_logger, get_tracer, setup_telemetry
 from src.common.pipeline_errors import AgentResult, ErrorSeverity, PipelineError
 from src.common.schemas import (
     CandidateConfidence,
@@ -76,9 +87,12 @@ from src.common.schemas import (
 
 load_dotenv()
 setup_telemetry("news-mas-orchestrator-1")
+configure_langsmith()
 logger = get_logger(__name__)
 
 _MAX_TOKENS_DEFAULT = 2_000_000
+_MAX_LLM_TOKENS_DEFAULT = 500_000
+_MAX_CONTENT_PER_TOPIC_DEFAULT = 100_000
 _MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 
 
@@ -106,7 +120,8 @@ class Phase1State(TypedDict):
     errors: Annotated[list[PipelineError], operator.add]
     run_status: str
     aap_token: Optional[str]
-    total_tokens_used: Annotated[int, operator.add]
+    total_tokens_used: Annotated[int, operator.add]   # LLM call token estimates only
+    content_tokens_used: Annotated[int, operator.add]  # Tavily / search content tokens
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -123,8 +138,13 @@ def _since_date_to_days(since_date: str) -> int:
         return int(os.getenv("SINCE_DATE_DEFAULT_DAYS", "7"))
 
 
-def _max_tokens() -> int:
-    return int(os.getenv("MAX_TOKENS_PER_RUN", str(_MAX_TOKENS_DEFAULT)))
+def _max_llm_tokens() -> int:
+    """Budget for LLM API calls only. MAX_LLM_TOKENS_PER_RUN takes precedence over MAX_TOKENS_PER_RUN."""
+    return int(os.getenv("MAX_LLM_TOKENS_PER_RUN", os.getenv("MAX_TOKENS_PER_RUN", str(_MAX_LLM_TOKENS_DEFAULT))))
+
+
+def _max_content_tokens_per_topic() -> int:
+    return int(os.getenv("MAX_CONTENT_TOKENS_PER_TOPIC", str(_MAX_CONTENT_PER_TOPIC_DEFAULT)))
 
 
 def _secret() -> str:
@@ -391,8 +411,36 @@ async def search_topic(state: dict) -> dict:
             output = await call_search_worker(inp)
 
             token_est = sum(_estimate_tokens(a.content) for a in output.articles)
+
+            # Truncate per-topic content if it exceeds budget — one noisy topic
+            # (e.g. cybersecurity raw content) should not crowd out others.
+            max_content = _max_content_tokens_per_topic()
+            if token_est > max_content and output.articles:
+                chars_budget = max_content * 4
+                chars_per_article = max(100, chars_budget // len(output.articles))
+                truncated = [
+                    a.model_copy(update={"content": a.content[:chars_per_article]})
+                    if len(a.content) > chars_per_article else a
+                    for a in output.articles
+                ]
+                output = output.model_copy(update={"articles": truncated})
+                original_tokens = token_est
+                token_est = sum(_estimate_tokens(a.content) for a in output.articles)
+                span.set_attribute("content_truncated", True)
+                span.set_attribute("content_tokens_before_truncation", original_tokens)
+                logger.info(
+                    "content_truncated_per_topic_limit",
+                    extra={
+                        "run_id": run_id,
+                        "topic_id": topic.topic_id,
+                        "original_tokens": original_tokens,
+                        "truncated_tokens": token_est,
+                        "limit": max_content,
+                    },
+                )
+
             span.set_attribute("article_count", len(output.articles))
-            span.set_attribute("token_estimate", token_est)
+            span.set_attribute("content_token_estimate", token_est)
 
             if not output.success:
                 err = output.error or PipelineError(
@@ -411,13 +459,13 @@ async def search_topic(state: dict) -> dict:
                 return {
                     "search_results": {topic.topic_id: output},
                     "errors": [err],
-                    "total_tokens_used": token_est,
+                    "content_tokens_used": token_est,
                 }
 
             return {
                 "search_results": {topic.topic_id: output},
                 "errors": [],
-                "total_tokens_used": token_est,
+                "content_tokens_used": token_est,
             }
 
         except Exception as exc:
@@ -442,7 +490,7 @@ async def search_topic(state: dict) -> dict:
             return {
                 "search_results": {topic.topic_id: failed_output},
                 "errors": [err],
-                "total_tokens_used": 0,
+                "content_tokens_used": 0,
             }
 
 
@@ -451,14 +499,19 @@ async def search_topic(state: dict) -> dict:
 async def fan_out_heat_score(state: Phase1State) -> dict:
     """
     Waypoint node.  Routing is handled by _route_heat_score conditional edge.
-    Checks the token budget here so the result can be written back to graph state
-    before the routing function reads it.
+    Checks the LLM token budget here so the result can be written back to graph
+    state before the routing function reads it.  Content tokens (Tavily raw
+    content) are tracked separately and do not contribute to this gate.
     """
-    if state.get("total_tokens_used", 0) > _max_tokens():
+    llm_tokens = state.get("total_tokens_used", 0)
+    if llm_tokens > _max_llm_tokens():
         logger.warning(
             "budget_exceeded_before_heat_score",
-            extra={"run_id": state["run_id"],
-                   "total_tokens_used": state.get("total_tokens_used", 0)},
+            extra={
+                "run_id": state["run_id"],
+                "llm_tokens_used": llm_tokens,
+                "content_tokens_used": state.get("content_tokens_used", 0),
+            },
         )
         return {"run_status": "budget_exceeded"}
     return {}
@@ -586,14 +639,18 @@ async def heat_score_topic(state: dict) -> dict:
 async def fan_out_filter(state: Phase1State) -> dict:
     """
     Waypoint node.  Routing is handled by _route_filter conditional edge.
-    Checks the token budget here so the result can be written back to graph state
-    before the routing function reads it.
+    Checks the LLM token budget here so the result can be written back to graph
+    state before the routing function reads it.  Content tokens do not gate here.
     """
-    if state.get("total_tokens_used", 0) > _max_tokens():
+    llm_tokens = state.get("total_tokens_used", 0)
+    if llm_tokens > _max_llm_tokens():
         logger.warning(
             "budget_exceeded_before_filter",
-            extra={"run_id": state["run_id"],
-                   "total_tokens_used": state.get("total_tokens_used", 0)},
+            extra={
+                "run_id": state["run_id"],
+                "llm_tokens_used": llm_tokens,
+                "content_tokens_used": state.get("content_tokens_used", 0),
+            },
         )
         return {"run_status": "budget_exceeded"}
     return {}
@@ -1107,7 +1164,8 @@ async def finalize_phase1(state: Phase1State) -> dict:
             else:
                 run_status = "complete"
 
-        total_tokens = state.get("total_tokens_used", 0)
+        llm_tokens = state.get("total_tokens_used", 0)
+        content_tokens = state.get("content_tokens_used", 0)
         candidates_count = sum(1 for c in ranked if not c.is_tombstone)
         tombstone_count = sum(1 for c in ranked if c.is_tombstone)
         duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -1115,7 +1173,8 @@ async def finalize_phase1(state: Phase1State) -> dict:
         span.set_attribute("run_status", run_status)
         span.set_attribute("candidates_count", candidates_count)
         span.set_attribute("tombstone_count", tombstone_count)
-        span.set_attribute("total_tokens_used", total_tokens)
+        span.set_attribute("llm_tokens_used", llm_tokens)
+        span.set_attribute("content_tokens_used", content_tokens)
 
         span.add_event(
             "phase1.complete",
@@ -1124,7 +1183,8 @@ async def finalize_phase1(state: Phase1State) -> dict:
                 "run_status": run_status,
                 "candidates_count": candidates_count,
                 "tombstone_count": tombstone_count,
-                "total_tokens_used": total_tokens,
+                "llm_tokens_used": llm_tokens,
+                "content_tokens_used": content_tokens,
                 "duration_ms": duration_ms,
             },
         )
@@ -1141,7 +1201,8 @@ async def finalize_phase1(state: Phase1State) -> dict:
                     "metrics": {
                         "candidates_count": candidates_count,
                         "tombstone_count": tombstone_count,
-                        "total_tokens_used": total_tokens,
+                        "llm_tokens_used": llm_tokens,
+                        "content_tokens_used": content_tokens,
                         "duration_ms": duration_ms,
                     },
                 })
@@ -1158,7 +1219,8 @@ async def finalize_phase1(state: Phase1State) -> dict:
                 "run_status": run_status,
                 "candidates_count": candidates_count,
                 "tombstone_count": tombstone_count,
-                "total_tokens_used": total_tokens,
+                "llm_tokens_used": llm_tokens,
+                "content_tokens_used": content_tokens,
                 "duration_ms": duration_ms,
             },
         )

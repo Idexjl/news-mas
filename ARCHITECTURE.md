@@ -60,16 +60,24 @@ SearchWorker → HeatScorer → FilterAgent → Selector → Phase1Judge
 
 **What it does:** Casts a wide net and narrows it to a shortlist.
 
-- `SearchWorker` fetches raw articles for each topic via the Tavily search API. Each result is
-  returned as a `SearchResult` (extends `RawArticle`) with a `ResultConfidence` value:
-  `FULL` (fetched), `SNIPPET` (fetch failed), `PARTIAL` (truncated), `INJECTED` (discarded),
+- `SearchWorker` fetches raw articles for each topic via the Tavily search API
+  (`search_depth=advanced`, `include_raw_content=True`). Content extraction follows a
+  two-path priority: (1) Tavily `raw_content` when non-empty → `confidence=FULL`,
+  `content_source="tavily_extract"`; (2) Jina Reader fallback (`https://r.jina.ai/{url}`)
+  for JS-rendered or paywalled pages → `confidence=PARTIAL`, `content_source="jina"`;
+  (3) Tavily snippet when both fail → `confidence=SNIPPET`, `content_source="snippet"`.
+  The custom httpx+BeautifulSoup page fetcher was removed — it caused widespread
+  HTTPStatusErrors on anti-scraping sites. `SearchResult` carries the new `content_source`
+  field so downstream agents and OTel spans can see extraction provenance.
+  Each result is returned as a `SearchResult` (extends `RawArticle`) with a `ResultConfidence` value:
+  `FULL` (Tavily extract), `PARTIAL` (Jina), `SNIPPET` (snippet fallback), `INJECTED` (discarded),
   or `SCRUBBED` (PHI removed). Injected articles are returned with empty content so the count
   flows to the heat scorer without forwarding payload.
 - `HeatScorer` assigns each article a 0.0–1.0 heat score. It skips INJECTED articles and
   aggregates all confidence values into a `CandidateConfidence` object (attached to
   `HeatScorerOutput`) that summarises source quality: full/snippet/partial/injection/scrubbed
-  counts, `confidence_ratio` (full / total), and an `overall_confidence` of HIGH/MEDIUM/LOW.
-  Thresholds are configurable via `CONFIDENCE_HIGH_THRESHOLD` / `CONFIDENCE_MEDIUM_THRESHOLD`.
+  counts, `confidence_ratio` (full + 0.5×partial) / total, and an `overall_confidence` of
+  HIGH (ratio ≥ 0.5) / MEDIUM (ratio ≥ 0.1 or any snippets present) / LOW.
   Any injection forces `overall_confidence` to LOW regardless of ratio.
 - `FilterAgent` enforces semantic constraints such as "no never-trumpers" or "no opinion pieces". It uses Gemma 4 to understand the *intent* of each constraint, not keyword matching. `INJECTED` articles are auto-removed without an LLM call. Results are batched (max 5 per call, configurable via `FILTER_BATCH_SIZE`). Constraint text is treated as user data and never appears in logs or OTel spans — violations are recorded by constraint index only. `FilterAgentOutput` carries `kept_results`, `removed_results`, and `removal_reasons` (with URL, constraint index, confidence, and an optional note for snippet-only removals).
 - `Selector` makes a curatorial selection of the top MAX_CANDIDATES topics (default 5). It uses Gemma 4 to reason holistically over four signals: heat score, source confidence (HIGH/MEDIUM/LOW from `CandidateConfidence`), content coverage quality (kept vs. removed results ratio), and category diversity. When `ENFORCE_DIVERSITY=true` (default), it actively avoids selecting five topics from the same domain even if they rank highest by heat score alone. An optional `topic_memory_context` input carries the last 3 run outcomes per topic from `TopicMemoryRepository` when available. Input is `ScoredFilteredTopic` objects (one per user topic); output is `SelectorOutput` with `selected[]` (topic_id, rank, reasoning), `rejected[]` (topic_id, reject_reason), `selection_confidence`, and `selected_articles` (flattened kept results for Phase1Judge).
@@ -100,12 +108,18 @@ gates the digest on relevance confidence.
   back to `Summarizer` with `feedback_for_summarizer`.
 - `RelevanceGate` makes the final pass/tombstone decision for each topic. It sees the
   full picture: heat score, source confidence, reviewer verdict, retry count, and budget
-  exhaustion status. Deterministic fast paths handle obvious cases (very hot + high
-  confidence → pass; very cold or budget exhausted → tombstone) without an LLM call.
+  exhaustion status. Deterministic fast paths handle obvious cases without an LLM call.
+  Fast-pass paths (in priority order): HIGH confidence + reviewer pass (regardless of heat
+  score — niche topics with full article content should not be penalised for low news
+  volume); very hot + high confidence; reviewer-approved at heat ≥ 0.7. Fast-tombstone
+  paths: budget exhausted; heat < 0.1 (too cold); LOW confidence + heat < 0.15.
   Borderline cases are sent to Claude Haiku for a binary decision. LLM unavailability
   degrades to pass so uncertain topics reach the digest rather than being silently dropped.
   Tombstoned topics receive a `DigestTombstone` with a user-friendly explanation.
-  `MODEL_OVERRIDE` applies.
+  `MODEL_OVERRIDE` applies. Prompt version `v1.1` adds explicit HIGH-confidence guidance
+  for the LLM path (niche topics with heat ≥ 0.15 + HIGH confidence should almost always
+  pass). Confidence thresholds in `CandidateConfidence.from_results` are now hardcoded
+  (0.5 HIGH, 0.1 MEDIUM) — no longer configurable via env vars.
 
 **Why the retry loop is capped:** Uncapped retries would stall the pipeline on a single
 bad article. Three attempts is enough to catch transient LLM variance; hard failures
@@ -127,8 +141,14 @@ easier to reason about and test independently.
   so Phase 2 can pass them directly to the summarizer and relevance gate.
 - `DigestEntry` now includes a `citations: list[Citation]` field from the summarizer.
 - `DigestOutput` is the top-level result type returned by both `run_phase2` and `run_full_pipeline`.
-- Token budget: Phase 1 tokens carried in `phase1_tokens_used`; each `process_candidate`
-  pre-checks `phase1_tokens + estimated_candidate_tokens > MAX_TOKENS_PER_RUN` and tombstones
+- Token budget: Phase 1 tracks two separate buckets — `content_tokens_used` (Tavily raw
+  content, search results) and `total_tokens_used` (LLM API calls: heat scorer, filter,
+  selector, judge).  Only LLM tokens gate the run; content tokens are observability-only.
+  Per-topic content is capped at `MAX_CONTENT_TOKENS_PER_TOPIC` (default 100k) before
+  the articles are passed downstream, preventing one noisy topic from crowding out others.
+  The LLM budget is set by `MAX_LLM_TOKENS_PER_RUN` (falls back to `MAX_TOKENS_PER_RUN`).
+  Each `process_candidate` in Phase 2 pre-checks
+  `phase1_tokens + estimated_candidate_tokens > MAX_TOKENS_PER_RUN` and tombstones
   without LLM calls if exceeded.
 - Agent calls are direct (`run_agent()` function imports), not HTTP, keeping Phase 2 in-process.
   HTTP transport applies when agents are deployed as separate FastAPI services (Phase 1 pattern).
@@ -263,7 +283,15 @@ where the registry may not be running; it would not be acceptable in production.
 - Pydantic v2 schemas (`src/common/schemas.py`)
 - Structured JSON logging that never emits raw content (`src/common/observability.py`)
 - PII/PHI scrubbing via Presidio (`src/common/pii_scrubber.py`)
-- Input normalisation + injection detection (`src/common/security.py`)
+- Input normalisation + context-aware injection detection (`src/common/security.py`).
+  Two detection modes: `DetectionMode.USER_INPUT` (all patterns — LLM injection,
+  SQL, XSS, path traversal) for topic text and user-supplied constraints;
+  `DetectionMode.CONTENT` (LLM injection patterns only) for scraped article
+  content, where SQL/XSS terminology in security articles would be false positives.
+  `is_safe_input()` uses USER_INPUT mode; `is_safe_content()` uses CONTENT mode.
+  The former trusted-domain allowlist (`TRUSTED_NEWS_DOMAINS`) has been removed —
+  domain membership is no longer needed now that CONTENT mode handles the
+  false-positive problem for all sources uniformly.
 - AAP token validation middleware (current: shared-secret; target: DPoP — see §4 and §5)
 
 ---
@@ -591,9 +619,21 @@ prompt versions.
 
 `configure_langsmith()` in `src/common/observability.py` maps `LANGSMITH_API_KEY` and
 `LANGSMITH_PROJECT` to the `LANGCHAIN_*` env vars that the LangChain/LangSmith SDK reads
-at call time. It is called from every LLM-agent `main.py` at startup alongside
-`setup_telemetry()`. If `LANGSMITH_API_KEY` is absent the function logs a warning and
+at call time. If `LANGSMITH_API_KEY` is absent the function logs a warning and
 returns `False` — agents start normally with tracing disabled (offline dev).
+
+**Initialization order (important):** `configure_langsmith()` is called at three points
+to prevent a race condition where parallel async tasks start before LangSmith is wired up:
+
+1. **Module level in `observability.py`** — `_LANGSMITH_CONFIGURED = configure_langsmith()`
+   runs at import time, before any graph or task is constructed.
+2. **Module level in `phase1/graph.py` and `phase2/graph.py`** — called after `load_dotenv()`
+   and `setup_telemetry()` so the compiled graph object is always traced.
+3. **Top of `run_full_pipeline()`** — ensures the pipeline runner re-confirms tracing is
+   active even when invoked from the scheduler or tests that import without running graphs.
+
+`configure_langsmith()` is idempotent (no-op if `LANGCHAIN_TRACING_V2=true` is already
+set), so calling it multiple times is safe.
 
 ### LLM run tagging
 

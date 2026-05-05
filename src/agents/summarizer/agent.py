@@ -78,7 +78,7 @@ _MODEL_ID = "claude-sonnet-4-6"   # hardcoded; never overridden by MODEL_OVERRID
 _PROMPT_VERSION = "v1.0"
 _MINI_PROMPT_NAME = f"mini_{_PROMPT_VERSION}"
 _REQUIRED_CAPABILITY = "summarize.content"
-_MAX_API_RETRIES = 2
+_MAX_API_RETRIES = 3
 _MIN_SUMMARY_WORDS = 100
 
 _validator = DataQualityValidator(agent_id=_AGENT_ID)
@@ -190,7 +190,12 @@ async def _call_claude(
         except _AnthropicRateLimitError as exc:
             last_exc = exc
             if attempt < _MAX_API_RETRIES:
-                await asyncio.sleep(2 ** attempt)
+                wait = min(2 ** (attempt + 1), 30)  # 2s, 4s, 8s, … capped at 30s
+                logger.warning(
+                    "summarizer.rate_limit_backoff",
+                    extra={"attempt": attempt, "wait_seconds": wait, "run_id": run_id},
+                )
+                await asyncio.sleep(wait)
 
         except _AnthropicAPIError as exc:
             last_exc = exc

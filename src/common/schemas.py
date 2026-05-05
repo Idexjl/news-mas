@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Literal, Optional
@@ -24,6 +23,7 @@ class SearchResult(RawArticle):
     """RawArticle annotated with source-quality confidence set by SearchWorker."""
     confidence: ResultConfidence = ResultConfidence.FULL
     confidence_reason: Optional[str] = None
+    content_source: str = "snippet"  # "tavily_extract" | "jina" | "snippet"
 
 
 class CandidateConfidence(BaseModel):
@@ -46,15 +46,9 @@ class CandidateConfidence(BaseModel):
         *,
         topic_id: str = "",
         heat_score: float = 0.0,
-        high_threshold: float | None = None,
-        medium_threshold: float | None = None,
+        high_threshold: float = 0.5,
+        medium_threshold: float = 0.1,
     ) -> "CandidateConfidence":
-        _high = high_threshold if high_threshold is not None else float(
-            os.getenv("CONFIDENCE_HIGH_THRESHOLD", "0.7")
-        )
-        _medium = medium_threshold if medium_threshold is not None else float(
-            os.getenv("CONFIDENCE_MEDIUM_THRESHOLD", "0.3")
-        )
         total = len(results)
         if total == 0:
             return cls(topic_id=topic_id, heat_score=heat_score)
@@ -65,13 +59,16 @@ class CandidateConfidence(BaseModel):
         injected = sum(1 for r in results if r.confidence == ResultConfidence.INJECTED)
         scrubbed = sum(1 for r in results if r.confidence == ResultConfidence.SCRUBBED)
 
-        ratio = full / total
+        ratio = (full + partial * 0.5) / total
 
         if injected > 0:
             overall: Literal["HIGH", "MEDIUM", "LOW"] = "LOW"
-        elif ratio >= _high:
+        elif ratio >= high_threshold:
             overall = "HIGH"
-        elif ratio >= _medium:
+        elif ratio >= medium_threshold or snippet > 0:
+            # Tavily snippets carry curated real signal; floor to MEDIUM even with
+            # zero successful fetches — snippet-only is the normal case when sites
+            # block HTTP fetchers.
             overall = "MEDIUM"
         else:
             overall = "LOW"
@@ -335,7 +332,7 @@ class RelevanceGateInput(BaseModel):
 class RelevanceGateOutput(AgentResult):
     run_id: str
     decision: Literal["pass", "tombstone"] = "pass"
-    gate_path: Literal["fast_pass", "fast_tombstone", "llm_decision"] = "fast_pass"
+    gate_path: Literal["fast_pass", "fast_pass_high_confidence", "fast_tombstone", "llm_decision"] = "fast_pass"
     tombstone: Optional[DigestTombstone] = None
     reasoning: Optional[str] = None  # internal LLM reasoning; never shown to user
 

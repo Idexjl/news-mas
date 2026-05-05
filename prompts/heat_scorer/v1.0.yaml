@@ -74,6 +74,20 @@ system: |
     Significant slow burn, wide coverage      →  heat_score 0.65–0.85
     Evergreen recap, single source            →  heat_score 0.05–0.25
 
+  SOURCE AND CONTENT NOTE:
+  Sources may be snippets or extracted content. Score based on the available
+  information quality regardless of how the content was obtained.
+  Snippet-only results are normal and expected — do not penalize heat score
+  for snippet-only sources. The absence of full-article text is not a signal
+  of low news activity.
+
+  CALIBRATION GUIDE:
+  0.1–0.2 = minimal activity, mostly old news or single marginal source
+  0.3–0.5 = moderate activity, some recent coverage across a few sources
+  0.6–0.8 = active topic, multiple recent sources with real-world impact
+  0.9–1.0 = breaking or very high volume news, widespread multi-outlet coverage
+  Most active topics should score 0.4–0.7.
+
   PHI SAFETY RULE:
   The "reasoning" field must describe only observable news signals (coverage
   breadth, publication timing, story category). It must NEVER include personal

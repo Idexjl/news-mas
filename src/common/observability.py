@@ -273,3 +273,8 @@ def configure_langsmith() -> bool:
     os.environ["LANGCHAIN_PROJECT"] = project
     os.environ.setdefault("LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com")
     return True
+
+
+# Configure at import time so module-level graph compilation (phase1/phase2 graphs)
+# and parallel async tasks always find LangSmith already wired up.
+_LANGSMITH_CONFIGURED = configure_langsmith()

@@ -35,6 +35,7 @@ Entra ID tokens once the auth layer is active. See phase1/graph.py
 """
 from __future__ import annotations
 
+import asyncio
 import operator
 import os
 import time
@@ -47,7 +48,7 @@ from langgraph.types import Send
 
 from src.auth.token_service import exchange_token, mint_token
 from src.common.error_codes import BUDGET_EXHAUSTED
-from src.common.observability import get_logger, get_tracer, setup_telemetry
+from src.common.observability import configure_langsmith, get_logger, get_tracer, setup_telemetry
 from src.common.pipeline_errors import ErrorSeverity, PipelineError
 from src.common.schemas import (
     DigestEntry,
@@ -65,11 +66,25 @@ from src.common.schemas import (
 
 load_dotenv()
 setup_telemetry("news-mas-orchestrator-2")
+configure_langsmith()
 logger = get_logger(__name__)
 
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 _MAX_TOKENS_DEFAULT = 2_000_000
 _CONFIDENCE_ORDER: dict[str, int] = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
+
+# Concurrency gate — limits simultaneous Anthropic Sonnet calls to prevent
+# rate-limit errors when all 5 candidates fan out at once.
+_MAX_PARALLEL_SUMMARIZERS = int(os.getenv("MAX_PARALLEL_SUMMARIZERS", "2"))
+_anthropic_sem: asyncio.Semaphore | None = None
+
+
+def _get_anthropic_semaphore() -> asyncio.Semaphore:
+    """Lazy-initialised semaphore — must be called from within an event loop."""
+    global _anthropic_sem
+    if _anthropic_sem is None:
+        _anthropic_sem = asyncio.Semaphore(_MAX_PARALLEL_SUMMARIZERS)
+    return _anthropic_sem
 
 
 # ── State reducers ─────────────────────────────────────────────────────────────
@@ -378,7 +393,7 @@ async def process_candidate(state: dict) -> dict:
             for ja in approved
         ]
 
-        # ── Retry loop ─────────────────────────────────────────────────────────
+        # ── Retry loop (rate-limited to MAX_PARALLEL_SUMMARIZERS concurrent) ────
         retry_count = 0
         reviewer_feedback: Optional[str] = None
         summary_out: Optional[SummarizerOutput] = None
@@ -387,66 +402,49 @@ async def process_candidate(state: dict) -> dict:
         total_tokens = 0
         errors: list[PipelineError] = []
 
-        with tracer.start_as_current_span(f"phase2.retry_loop.{topic_id}") as loop_span:
-            loop_span.set_attribute("max_retries", MAX_RETRIES)
+        # Acquire the concurrency semaphore before Anthropic API calls.
+        # Limits simultaneous Sonnet calls to MAX_PARALLEL_SUMMARIZERS (default 2)
+        # to prevent rate-limit errors when all candidates fan out together.
+        async with _get_anthropic_semaphore():
+            with tracer.start_as_current_span(f"phase2.retry_loop.{topic_id}") as loop_span:
+                loop_span.set_attribute("max_retries", MAX_RETRIES)
 
-            while retry_count <= MAX_RETRIES:
+                while retry_count <= MAX_RETRIES:
 
-                # ── Summarize ──────────────────────────────────────────────────
-                summarizer_token = _exchange_for_agent(
-                    aap_token, "summarizer", ["summarize.content"]
-                )
-                sum_inp = SummarizerInput(
-                    run_id=run_id,
-                    article=primary_article,
-                    sources=sources,
-                    topic_text=candidate.topic_text,
-                    reviewer_feedback=reviewer_feedback,
-                    retry_count=retry_count,
-                    aap_token=summarizer_token,
-                )
-
-                try:
-                    summary_out = await run_summarizer_agent(sum_inp)
-                    total_tokens += max(500, estimated_tokens // 3)
-                except Exception as exc:
-                    fatal_err = PipelineError(
-                        error_code="SUMMARIZER_EXCEPTION",
-                        severity=ErrorSeverity.FATAL,
-                        agent_id="summarizer",
+                    # ── Summarize ──────────────────────────────────────────────
+                    summarizer_token = _exchange_for_agent(
+                        aap_token, "summarizer", ["summarize.content"]
+                    )
+                    sum_inp = SummarizerInput(
                         run_id=run_id,
-                        topic_id=topic_id,
-                        message="Summarizer raised unexpected exception",
-                        context={"error_type": type(exc).__name__,
-                                 "retry_count": retry_count},
+                        article=primary_article,
+                        sources=sources,
+                        topic_text=candidate.topic_text,
+                        reviewer_feedback=reviewer_feedback,
+                        retry_count=retry_count,
+                        aap_token=summarizer_token,
                     )
-                    errors.append(fatal_err)
-                    logger.error(
-                        "process_candidate_summarizer_exception",
-                        extra={"run_id": run_id, "topic_id": topic_id,
-                               "error_type": type(exc).__name__},
-                    )
-                    gate_out = _gate_tombstone(
-                        run_id, candidate, "gate_decision",
-                        "Coverage of this topic could not be completed.",
-                    )
-                    loop_span.set_attribute("actual_retries", retry_count)
-                    loop_span.set_attribute("budget_exhausted", False)
-                    cand_span.set_attribute("final_verdict", "tombstone")
-                    cand_span.set_attribute("gate_decision", "tombstone")
-                    cand_span.set_attribute("retry_count", retry_count)
-                    return {
-                        "gate_decisions": {topic_id: gate_out},
-                        "retry_counts": {topic_id: retry_count},
-                        "budget_exhausted": {topic_id: False},
-                        "errors": errors,
-                        "total_tokens_used": total_tokens,
-                    }
 
-                if not summary_out.success:
-                    err = summary_out.error
-                    if err and err.severity == ErrorSeverity.FATAL:
-                        errors.append(err)
+                    try:
+                        summary_out = await run_summarizer_agent(sum_inp)
+                        total_tokens += max(500, estimated_tokens // 3)
+                    except Exception as exc:
+                        fatal_err = PipelineError(
+                            error_code="SUMMARIZER_EXCEPTION",
+                            severity=ErrorSeverity.FATAL,
+                            agent_id="summarizer",
+                            run_id=run_id,
+                            topic_id=topic_id,
+                            message="Summarizer raised unexpected exception",
+                            context={"error_type": type(exc).__name__,
+                                     "retry_count": retry_count},
+                        )
+                        errors.append(fatal_err)
+                        logger.error(
+                            "process_candidate_summarizer_exception",
+                            extra={"run_id": run_id, "topic_id": topic_id,
+                                   "error_type": type(exc).__name__},
+                        )
                         gate_out = _gate_tombstone(
                             run_id, candidate, "gate_decision",
                             "Coverage of this topic could not be completed.",
@@ -463,65 +461,86 @@ async def process_candidate(state: dict) -> dict:
                             "errors": errors,
                             "total_tokens_used": total_tokens,
                         }
-                    # RETRYABLE — try again
-                    if err:
-                        errors.append(err)
-                    retry_count += 1
-                    continue
 
-                # ── Review ─────────────────────────────────────────────────────
-                reviewer_token = _exchange_for_agent(
-                    aap_token, "reviewer", ["review.content"]
-                )
-                rev_inp = ReviewerInput(
-                    run_id=run_id,
-                    article=primary_article,
-                    summary=summary_out.summary,
-                    key_points=summary_out.key_points,
-                    citations=summary_out.citations,
-                    sources=sources,
-                    retry_count=retry_count,
-                    aap_token=reviewer_token,
-                )
+                    if not summary_out.success:
+                        err = summary_out.error
+                        if err and err.severity == ErrorSeverity.FATAL:
+                            errors.append(err)
+                            gate_out = _gate_tombstone(
+                                run_id, candidate, "gate_decision",
+                                "Coverage of this topic could not be completed.",
+                            )
+                            loop_span.set_attribute("actual_retries", retry_count)
+                            loop_span.set_attribute("budget_exhausted", False)
+                            cand_span.set_attribute("final_verdict", "tombstone")
+                            cand_span.set_attribute("gate_decision", "tombstone")
+                            cand_span.set_attribute("retry_count", retry_count)
+                            return {
+                                "gate_decisions": {topic_id: gate_out},
+                                "retry_counts": {topic_id: retry_count},
+                                "budget_exhausted": {topic_id: False},
+                                "errors": errors,
+                                "total_tokens_used": total_tokens,
+                            }
+                        # RETRYABLE — try again
+                        if err:
+                            errors.append(err)
+                        retry_count += 1
+                        continue
 
-                try:
-                    review_out = await run_reviewer_agent(rev_inp)
-                    total_tokens += max(300, estimated_tokens // 4)
-                except Exception as exc:
-                    logger.warning(
-                        "phase2_reviewer_exception_degraded",
-                        extra={"run_id": run_id, "topic_id": topic_id,
-                               "error_type": type(exc).__name__},
+                    # ── Review ─────────────────────────────────────────────────
+                    reviewer_token = _exchange_for_agent(
+                        aap_token, "reviewer", ["review.content"]
                     )
-                    review_out = ReviewerOutput(
+                    rev_inp = ReviewerInput(
                         run_id=run_id,
-                        success=True,
-                        approved=True,
-                        verdict="pass",
-                        confidence="LOW",
-                        endorsement_note="reviewer_exception — proceeding unreviewed",
-                        warnings=["reviewer_exception"],
+                        article=primary_article,
+                        summary=summary_out.summary,
+                        key_points=summary_out.key_points,
+                        citations=summary_out.citations,
+                        sources=sources,
+                        retry_count=retry_count,
+                        aap_token=reviewer_token,
                     )
-                    break
 
-                if not review_out.success:
-                    # Reviewer unavailable (DEGRADED) — proceed unreviewed
-                    break
+                    try:
+                        review_out = await run_reviewer_agent(rev_inp)
+                        total_tokens += max(300, estimated_tokens // 4)
+                    except Exception as exc:
+                        logger.warning(
+                            "phase2_reviewer_exception_degraded",
+                            extra={"run_id": run_id, "topic_id": topic_id,
+                                   "error_type": type(exc).__name__},
+                        )
+                        review_out = ReviewerOutput(
+                            run_id=run_id,
+                            success=True,
+                            approved=True,
+                            verdict="pass",
+                            confidence="LOW",
+                            endorsement_note="reviewer_exception — proceeding unreviewed",
+                            warnings=["reviewer_exception"],
+                        )
+                        break
 
-                if review_out.verdict == "pass":
-                    break  # proceed to gate
+                    if not review_out.success:
+                        # Reviewer unavailable (DEGRADED) — proceed unreviewed
+                        break
 
-                # Failed review — consume a retry slot
-                retry_count += 1
-                if retry_count > MAX_RETRIES:
-                    budget_exhausted_flag = True
-                    break
+                    if review_out.verdict == "pass":
+                        break  # proceed to gate
 
-                reviewer_feedback = review_out.feedback
+                    # Failed review — consume a retry slot
+                    retry_count += 1
+                    if retry_count > MAX_RETRIES:
+                        budget_exhausted_flag = True
+                        break
 
-            # ── End of retry loop ──────────────────────────────────────────────
-            loop_span.set_attribute("actual_retries", retry_count)
-            loop_span.set_attribute("budget_exhausted", budget_exhausted_flag)
+                    reviewer_feedback = review_out.feedback
+
+                # ── End of retry loop ──────────────────────────────────────────
+                loop_span.set_attribute("actual_retries", retry_count)
+                loop_span.set_attribute("budget_exhausted", budget_exhausted_flag)
 
         # ── Relevance gate ─────────────────────────────────────────────────────
         reviewer_verdict: Literal["pass", "fail"] = "pass"

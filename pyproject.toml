@@ -28,6 +28,7 @@ dependencies = [
     "lxml",
     "apscheduler",
     "cryptography",
+    "pytector",
     "pytest",
     "pytest-asyncio",
     "pytest-dotenv",

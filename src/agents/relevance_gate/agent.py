@@ -6,13 +6,14 @@ Fast paths skip the LLM for obvious cases — tokens and latency saved on clear 
 LLM path handles borderline heat/confidence combinations.
 
 Decision priority (evaluated in order):
-  1. budget_exhausted     → fast tombstone (deterministic)
-  2. heat < 0.2           → fast tombstone (too_cold)
-  3. LOW conf + heat < 0.4 → fast tombstone (low_confidence)
-  4. heat >= 0.8 + HIGH   → fast pass
-  5. reviewer pass + heat >= 0.7 → fast pass
-  6. reviewer fail        → fast tombstone (review_failed)
-  7. everything else      → LLM decision
+  1. budget_exhausted               → fast tombstone (deterministic)
+  2. heat < 0.1                     → fast tombstone (too_cold)
+  3. LOW conf + heat < 0.15         → fast tombstone (low_confidence)
+  4. HIGH conf + reviewer pass      → fast pass (fast_pass_high_confidence)
+  5. heat >= 0.8 + HIGH             → fast pass
+  6. reviewer pass + heat >= 0.7   → fast pass
+  7. reviewer fail                  → fast tombstone (review_failed)
+  8. everything else                → LLM decision
 
 LLM unavailable → DEGRADED: default to pass rather than incorrectly excluding.
 
@@ -88,7 +89,7 @@ from src.common.schemas import (
 _DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 _DEFAULT_PROVIDER = "anthropic"
 _AGENT_ID = "relevance-gate"
-_PROMPT_VERSION = "v1.0"
+_PROMPT_VERSION = "v1.1"
 _REQUIRED_CAPABILITY = "gate.relevance"
 _MAX_JSON_RETRIES = 2
 
@@ -186,22 +187,30 @@ def _fast_path(
         return "tombstone", "fast_tombstone", "budget_exhausted"
 
     # Priority 2 — too cold: not enough activity regardless of confidence
-    if inp.heat_score < 0.2:
+    if inp.heat_score < 0.1:
         return "tombstone", "fast_tombstone", "too_cold"
 
     # Priority 3 — low confidence at low heat: unreliable AND quiet
-    if inp.overall_confidence == "LOW" and inp.heat_score < 0.4:
+    # Only tombstone when BOTH confidence is truly LOW and heat is minimal —
+    # MEDIUM (including snippet-floored topics) is allowed through to the LLM.
+    if inp.overall_confidence == "LOW" and inp.heat_score < 0.15:
         return "tombstone", "fast_tombstone", "low_confidence"
 
-    # Priority 4 — high heat + high confidence: always include
+    # Priority 4 — HIGH confidence + reviewer pass: trust the source quality
+    # HIGH means full article content from reliable sources; heat score is not
+    # penalised for niche topics (sports, gaming, local events) with low volume.
+    if inp.overall_confidence == "HIGH" and inp.reviewer_verdict == "pass":
+        return "pass", "fast_pass_high_confidence", None
+
+    # Priority 5 — high heat + high confidence: always include
     if inp.heat_score >= 0.8 and inp.overall_confidence == "HIGH":
         return "pass", "fast_pass", None
 
-    # Priority 5 — reviewer already approved at good heat: trust the reviewer
+    # Priority 6 — reviewer already approved at good heat: trust the reviewer
     if inp.reviewer_verdict == "pass" and inp.heat_score >= 0.7:
         return "pass", "fast_pass", None
 
-    # Priority 6 — reviewer failed outside normal flow: tombstone conservatively
+    # Priority 7 — reviewer failed outside normal flow: tombstone conservatively
     if inp.reviewer_verdict == "fail":
         return "tombstone", "fast_tombstone", "review_failed"
 

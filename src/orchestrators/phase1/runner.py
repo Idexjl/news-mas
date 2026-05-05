@@ -35,6 +35,7 @@ def _initial_state(
         run_status="pending",
         aap_token=None,
         total_tokens_used=0,
+        content_tokens_used=0,
     )
 
 

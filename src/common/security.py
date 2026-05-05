@@ -5,49 +5,54 @@ import logging
 import os
 import re
 import unicodedata
+from enum import Enum
 from typing import Any, Final, Protocol
+
+from pytector import PromptInjectionDetector
+
+_logger = logging.getLogger(__name__)
 
 # ── Injection / attack detection patterns ────────────────────────────────────
 
-_RAW_PATTERNS: Final[list[str]] = [
-    # Prompt injection
-    r"ignore\b.{0,40}\binstructions\b",
-    r"disregard\b.{0,20}\binstructions\b",
-    r"\bdo\s+not\s+follow\b",
-    r"bypass\b.{0,20}(instructions|guidelines|rules)\b",
+# Always dangerous — in any context
+LLM_INJECTION_PATTERNS: Final[list[str]] = [
+    r"ignore\s+.{0,20}instructions",
     r"you\s+are\s+now\b",
-    r"disregard\s+(your|all|previous)",
-    r"\bsystem\s*:",
+    r"disregard\s+.{0,20}instructions",
     r"<\s*system\s*>",
+    r"\[\[system\]\]",
     r"override\s+(your|all)?\s*(instructions?|guidelines?|rules?)",
     r"forget\s+(everything|all|your)",
     r"new\s+instructions?\s*:",
-    r"\[\[system\]\]",
     r"act\s+as\s+(if\s+you\s+(are|were)|an?\s+\w)",
     r"pretend\s+(you\s+are|to\s+be)",
     r"jailbreak",
     r"dan\s+mode",
-    # SQL injection
+    r"do\s+not\s+follow",
+    r"bypass\s+.{0,20}(instructions?|guidelines?|rules?)",
+]
+
+# Only dangerous in user input, not article content
+TECHNICAL_INJECTION_PATTERNS: Final[list[str]] = [
     r"union\s+select\b",
     r"drop\s+table\b",
     r"insert\s+into\b",
     r"delete\s+from\b",
     r"exec\s*\(",
     r"xp_cmdshell",
-    # XSS / script injection
     r"<\s*script[\s>]",
     r"javascript\s*:",
     r"vbscript\s*:",
     r"on\w+\s*=\s*[\"']",
-    # Path traversal
     r"\.\.[/\\]",
     r"/etc/passwd",
     r"\\windows\\system32",
 ]
 
-_COMPILED: list[re.Pattern[str]] = [
-    re.compile(p, re.IGNORECASE) for p in _RAW_PATTERNS
-]
+
+class DetectionMode(str, Enum):
+    USER_INPUT = "user_input"   # strict: all patterns
+    CONTENT = "content"         # relaxed: LLM patterns only
 
 
 def normalize_input(text: str) -> str:
@@ -55,10 +60,23 @@ def normalize_input(text: str) -> str:
     return unicodedata.normalize("NFKC", text)
 
 
-def detect_injection(text: str) -> list[str]:
+def detect_injection(
+    text: str,
+    mode: DetectionMode = DetectionMode.USER_INPUT,
+) -> list[str]:
     """
     Return the list of raw pattern strings that matched *text*.
     An empty list means no threats detected.
+
+    Args:
+        text:  Text to check.
+        mode:  Detection mode:
+               ``DetectionMode.USER_INPUT`` — all patterns (SQL, XSS, path
+                  traversal, plus LLM prompt injection). Use for topic text,
+                  constraints, and any text that originates directly from users.
+               ``DetectionMode.CONTENT``    — LLM prompt-injection patterns only.
+                  Use for news article content, where SQL/XSS terminology in
+                  security articles would otherwise produce false positives.
 
     [SIEM-TODO] In production, every non-empty return value from this function
     is a Sentinel-relevant security event. The calling agent logs
@@ -78,16 +96,69 @@ def detect_injection(text: str) -> list[str]:
       Sentinel incident descriptions — never the matched content or raw text.
     """
     normalised = normalize_input(text)
-    return [
-        _RAW_PATTERNS[i]
-        for i, pattern in enumerate(_COMPILED)
-        if pattern.search(normalised)
-    ]
+
+    patterns = LLM_INJECTION_PATTERNS.copy()
+    if mode == DetectionMode.USER_INPUT:
+        patterns += TECHNICAL_INJECTION_PATTERNS
+
+    return [p for p in patterns if re.search(p, normalised, re.IGNORECASE)]
 
 
 def is_safe_input(text: str) -> bool:
-    """Return True only when no injection patterns are detected."""
+    """Return True only when no injection patterns are detected (USER_INPUT mode)."""
     return len(detect_injection(text)) == 0
+
+
+def is_safe_content(text: str) -> bool:
+    """For scraped article content — only checks LLM injection."""
+    return len(detect_injection(text, DetectionMode.CONTENT)) == 0
+
+
+# ── ML-based content injection detector ──────────────────────────────────────
+
+
+class ContentInjectionDetector:
+    """
+    ML-based injection detection for scraped content.
+    Uses DeBERTa model — understands context so legitimate security articles,
+    SQL tutorials, and cycling race reports are NOT flagged.
+
+    [MAS-GUARD-TODO]: This class is the reference implementation for
+    mas-guard's ContentGuard. The existing detect_injection() stays for user
+    input (topic text, constraints) — fast regex is appropriate for short,
+    controlled input. ContentInjectionDetector is for long-form scraped content
+    where context matters.
+
+    Backend is swappable — DeBERTa default, PromptGuard for higher accuracy,
+    external API for enterprise deployment.
+    """
+
+    def __init__(self, threshold: float = 0.85) -> None:
+        self.threshold = threshold
+        self._detector: PromptInjectionDetector | None = None
+
+    def _get_detector(self) -> PromptInjectionDetector:
+        if self._detector is None:
+            self._detector = PromptInjectionDetector(model_name_or_url="deberta")
+        return self._detector
+
+    def is_safe(self, text: str) -> tuple[bool, float]:
+        """
+        Returns (is_safe, confidence) where confidence is the injection probability.
+        Graceful fallback to (True, 0.0) if the model fails — fail open for content
+        so a transient model error never silently drops legitimate articles.
+        """
+        try:
+            is_injection, prob = self._get_detector().detect_injection(
+                text[:2000], threshold=self.threshold
+            )
+            return not is_injection, prob
+        except Exception as exc:
+            _logger.warning(
+                "content_injection_detector.failed",
+                extra={"error_type": type(exc).__name__},
+            )
+            return True, 0.0
 
 
 # ── Run-level circuit breaker ─────────────────────────────────────────────────

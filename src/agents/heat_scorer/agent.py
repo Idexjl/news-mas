@@ -478,6 +478,18 @@ async def _traced_run(
     )
 
     logger.info(
+        "heat_scorer.confidence_calc",
+        extra={
+            "full_count": candidate_confidence.full_content_count,
+            "partial_count": candidate_confidence.partial_count,
+            "snippet_count": candidate_confidence.snippet_only_count,
+            "total": candidate_confidence.total_results,
+            "confidence_ratio": candidate_confidence.confidence_ratio,
+            "overall_confidence": candidate_confidence.overall_confidence,
+        },
+    )
+
+    logger.info(
         "heat_scorer_complete",
         extra={
             "run_id": inp.run_id,

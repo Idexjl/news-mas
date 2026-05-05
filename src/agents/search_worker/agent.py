@@ -1,19 +1,22 @@
 """
-SearchWorker agent — discovers, fetches, scrubs, and returns news articles.
+SearchWorker agent — discovers and returns news articles.
 
 Pipeline for each topic in the request:
-  1. Tavily search  → article URLs + snippets
-  2. Concurrent httpx page fetch (async, 15 s timeout per URL)
-  3. BeautifulSoup HTML strip → plain text
-  4. Truncate to TOKEN_BUDGET_SOURCES chars
-  5. PII/PHI scrub via Presidio
-  6. Prompt-injection check — discard result on match
-  7. Assemble RawArticle
+  1. Tavily search (advanced depth, include_raw_content=True)
+  2. Content extraction, in priority order:
+       a. Tavily raw_content  → confidence FULL,    content_source "tavily_extract"
+       b. Jina Reader fallback → confidence PARTIAL, content_source "jina"
+       c. Tavily snippet      → confidence SNIPPET,  content_source "snippet"
+  3. PII/PHI scrub via Presidio → overrides confidence to SCRUBBED when entities found
+  4. Prompt-injection check — discards result on match (confidence INJECTED)
+  5. Assemble SearchResult
 
 OTel spans emitted per topic:
-  search_worker.search      (parent)  → topic, run_id, result_count
-  egress.tavily.search      (child)   → query_length, max_results, response_time_ms
-  egress.http.fetch         (child)   → egress.host, content_length, pii_count, injection_detected
+  search_worker.search    (parent) → topic, run_id, result_count, articles_kept
+  egress.tavily.search    (child)  → query_length, max_results, response_time_ms
+  egress.http.fetch       (child)  → egress.host, content_source, content_length,
+                                     pii_count, injection_detected
+  search_worker.scrub     (child)  → confidence distribution + content_source counts
 """
 from __future__ import annotations
 
@@ -25,7 +28,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 try:
@@ -43,18 +45,16 @@ from src.common.observability import configure_langsmith, get_logger, get_meter,
 from src.common.pii_scrubber import scrub_text
 from src.common.pipeline_errors import ResultConfidence
 from src.common.prompt_loader import make_run_config
-from src.common.schemas import RawArticle, SearchResult, SearchWorkerInput, SearchWorkerOutput
-from src.common.security import detect_injection
+from src.common.schemas import SearchResult, SearchWorkerInput, SearchWorkerOutput
+from src.common.security import ContentInjectionDetector
 
 logger = get_logger(__name__)
 
-_FETCH_TIMEOUT: float = 15.0
 _TOKEN_BUDGET: int = int(os.getenv("TOKEN_BUDGET_SOURCES", "200000"))
 _REQUIRED_CAPABILITY = "search.web"
 
-# Tags stripped from fetched HTML before extracting text.
-_DROP_TAGS = ["script", "style", "nav", "header", "footer", "aside", "noscript"]
-
+_INJECTION_THRESHOLD: float = float(os.getenv("INJECTION_DETECTION_THRESHOLD", "0.85"))
+_content_detector = ContentInjectionDetector(threshold=_INJECTION_THRESHOLD)
 
 # ── egress metrics ─────────────────────────────────────────────────────────────
 
@@ -128,16 +128,6 @@ def _validate_aap_token(token: str) -> dict[str, Any]:
     return claims
 
 
-async def _fetch_page(http: httpx.AsyncClient, url: str) -> str:
-    """Fetch *url* and return stripped plain text. Raises on HTTP/timeout error."""
-    resp = await http.get(url, follow_redirects=True)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "lxml")
-    for tag in soup(_DROP_TAGS):
-        tag.decompose()
-    return soup.get_text(separator=" ", strip=True)
-
-
 def _parse_published_at(raw: str | None) -> datetime | None:
     if not raw:
         return None
@@ -158,15 +148,22 @@ async def _tavily_search(
     since_days: int,
 ) -> dict[str, Any]:
     """
-    Call client.search() with recency filtering.
+    Call client.search() with recency filtering and raw content extraction.
+
+    Uses search_depth from TAVILY_SEARCH_DEPTH env (default "advanced") and
+    include_raw_content=True so Tavily returns pre-extracted article text,
+    eliminating the need for a separate page fetcher.
 
     Falls back to a call without days= when the installed tavily-python version
     pre-dates that parameter (raises TypeError on an unexpected kwarg).
     """
+    search_depth = os.getenv("TAVILY_SEARCH_DEPTH", "advanced")
     base: dict[str, Any] = {
         "query": query,
         "max_results": max_results,
-        "search_depth": "basic",
+        "search_depth": search_depth,
+        "include_raw_content": True,
+        "include_answer": False,
     }
     try:
         return await asyncio.to_thread(client.search, **base, days=since_days)
@@ -178,76 +175,113 @@ async def _tavily_search(
         return await asyncio.to_thread(client.search, **base)
 
 
+# ── Jina Reader fallback ──────────────────────────────────────────────────────
+
+async def _fetch_with_jina(url: str) -> str | None:
+    """
+    Jina Reader converts any URL to clean markdown.
+    Free, no API key, handles JS-rendered pages.
+
+    [CONTENT-EXTRACTION-TODO] In production consider:
+    - Jina Reader Pro for higher rate limits
+    - Diffbot for enterprise content extraction
+    - Browserless for JS-heavy sites
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"https://r.jina.ai/{url}",
+                timeout=15.0,
+                headers={"Accept": "text/markdown"},
+            )
+            if response.status_code == 200:
+                content = response.text
+                if len(content) > 200:
+                    return content
+        return None
+    except Exception:
+        return None
+
+
 # ── per-result processing with egress.http.fetch span ─────────────────────────
 
 async def _process_result(
     tracer: Any,
-    http: httpx.AsyncClient,
     result: dict[str, Any],
 ) -> SearchResult | None:
-    """Fetch, scrub, and injection-check one Tavily result. Returns SearchResult or None."""
+    """
+    Extract, scrub, and injection-check one Tavily result.
+
+    Content extraction priority:
+      1. Tavily raw_content   → confidence FULL,    content_source "tavily_extract"
+      2. Jina Reader fallback → confidence PARTIAL, content_source "jina"
+      3. Tavily snippet       → confidence SNIPPET,  content_source "snippet"
+
+    Injection detection and PHI scrub run on all content regardless of source.
+    """
     url: str = result.get("url", "")
     title: str = result.get("title", "")
     snippet: str = result.get("content", "")
     hostname = urllib.parse.urlparse(url).hostname or url
 
     instr = _get_egress_instruments()
-    start = time.monotonic()
+
+    # ── Content extraction ────────────────────────────────────────────────────
+    # Confidence reflects content AVAILABILITY, not PHI status.
+    # Threshold > 500 chars avoids treating a near-empty raw_content field as FULL.
+    raw_content = result.get("raw_content")  # None when not present
+    if raw_content and len(raw_content) > 500:
+        raw_text = raw_content[:_TOKEN_BUDGET]
+        base_confidence = ResultConfidence.FULL
+        content_source = "tavily_extract"
+    else:
+        jina_text = await _fetch_with_jina(url)
+        if jina_text:
+            raw_text = jina_text[:_TOKEN_BUDGET]
+            base_confidence = ResultConfidence.PARTIAL
+            content_source = "jina"
+        else:
+            raw_text = snippet
+            base_confidence = ResultConfidence.SNIPPET
+            content_source = "snippet"
 
     with tracer.start_as_current_span("egress.http.fetch") as span:
         # Capture hostname only — full URL may contain sensitive query params.
         span.set_attribute("egress.host", hostname)
         span.set_attribute("egress.type", "content_fetch")
-
-        fetch_failed = False
-        truncated = False
-        try:
-            full_text = await _fetch_page(http, url)
-            truncated = len(full_text) > _TOKEN_BUDGET
-            raw_text = full_text[:_TOKEN_BUDGET]
-        except Exception as exc:
-            logger.info(
-                "page_fetch_fallback",
-                extra={"egress_host": hostname, "error_type": type(exc).__name__},
-            )
-            fetch_failed = True
-            raw_text = snippet
-
-        elapsed = (time.monotonic() - start) * 1000
-        span.set_attribute("egress.response_time_ms", elapsed)
+        span.set_attribute("egress.content_source", content_source)
         span.set_attribute("egress.content_length", len(raw_text))
 
         # PII/PHI scrub
         scrubbed_title = scrub_text(title)
         scrubbed_content = scrub_text(raw_text)
-        scrubbed_snippet = scrub_text(snippet)
 
-        pii_count = (
-            scrubbed_title.count("<")
-            + scrubbed_content.count("<")
-            + scrubbed_snippet.count("<")
-        )
+        pii_count = scrubbed_title.count("<") + scrubbed_content.count("<")
         span.set_attribute("egress.scrubbed", pii_count > 0)
         span.set_attribute("egress.pii_count", pii_count)
 
-        # Injection check on already-scrubbed content
-        patterns = detect_injection(scrubbed_content)
-        injection_detected = bool(patterns)
+        # ML-based injection detection — DeBERTa understands context so security
+        # articles, SQL tutorials, and sports reports are correctly identified as safe.
+        is_safe_content, injection_confidence = _content_detector.is_safe(scrubbed_content)
+        injection_detected = not is_safe_content
+
         span.set_attribute("egress.injection_detected", injection_detected)
+        span.set_attribute("egress.injection_confidence", round(injection_confidence, 4))
 
         if injection_detected:
             logger.warning(
                 "injection_detected_discarding_result",
                 extra={
                     "egress_host": hostname,
-                    "pattern_count": len(patterns),
-                    # Never log matched patterns or raw content.
+                    "injection_confidence": round(injection_confidence, 4),
+                    "detection_mode": "content_ml",
+                    # Never log matched content.
                 },
             )
             instr["injection_detected"].add(1)
             logger.warning(
                 "egress.security.injection",
-                extra={"egress_host": hostname, "pattern_count": len(patterns)},
+                extra={"egress_host": hostname, "injection_confidence": round(injection_confidence, 4)},
             )
             span.set_attribute("egress.confidence", ResultConfidence.INJECTED.value)
             # Return with empty content — injected payload is never forwarded.
@@ -258,22 +292,18 @@ async def _process_result(
                 source=result.get("source", ""),
                 published_at=_parse_published_at(result.get("published_date")),
                 confidence=ResultConfidence.INJECTED,
-                confidence_reason=f"injection_patterns:{len(patterns)}",
+                confidence_reason=f"ml_injection:{injection_confidence:.2f}",
+                content_source=content_source,
             )
 
-        # Determine source-quality confidence
-        if pii_count > 0:
-            confidence = ResultConfidence.SCRUBBED
-            confidence_reason = f"phi_entities:{pii_count}"
-        elif fetch_failed:
-            confidence = ResultConfidence.SNIPPET
-            confidence_reason = "fetch_failed"
-        elif truncated:
-            confidence = ResultConfidence.PARTIAL
-            confidence_reason = "truncated_at_token_budget"
-        else:
-            confidence = ResultConfidence.FULL
-            confidence_reason = None
+        # Confidence reflects content availability (FULL/PARTIAL/SNIPPET), not PHI status.
+        # PHI presence is recorded in confidence_reason for observability; it does not
+        # downgrade confidence because the content is still fully extracted — just cleaned.
+        confidence = base_confidence
+        confidence_reason = (
+            f"phi_entities:{pii_count}" if pii_count > 0
+            else (None if base_confidence == ResultConfidence.FULL else base_confidence.value)
+        )
 
         span.set_attribute("egress.confidence", confidence.value)
         instr["fetch_calls"].add(1)
@@ -286,6 +316,7 @@ async def _process_result(
         source=result.get("source", ""),
         confidence=confidence,
         confidence_reason=confidence_reason,
+        content_source=content_source,
     )
 
 
@@ -296,7 +327,7 @@ async def _search_topic(
     inp: SearchWorkerInput,
     tracer: Any,
 ) -> list[SearchResult]:
-    """Run Tavily search for one topic, fetch pages concurrently, scrub, return articles."""
+    """Run Tavily search for one topic, extract content, scrub, return articles."""
 
     with tracer.start_as_current_span("search_worker.search") as span:
         span.set_attribute("topic", topic)
@@ -404,12 +435,11 @@ async def _search_topic(
 
         span.set_attribute("result_count", len(results))
 
-        # Fetch, scrub, and injection-check all results concurrently.
-        async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT) as http:
-            processed: list[SearchResult | None | BaseException] = await asyncio.gather(
-                *[_process_result(tracer, http, r) for r in results],
-                return_exceptions=True,
-            )
+        # Process all results concurrently — each creates its own Jina client if needed.
+        processed: list[SearchResult | None | BaseException] = await asyncio.gather(
+            *[_process_result(tracer, r) for r in results],
+            return_exceptions=True,
+        )
 
         articles: list[SearchResult] = []
         for item in processed:
@@ -421,14 +451,20 @@ async def _search_topic(
             elif item is not None:
                 articles.append(item)
 
-        # Confidence distribution span — aggregate counts across all fetched results.
+        # Confidence distribution + content_source distribution span.
         with tracer.start_as_current_span("search_worker.scrub") as scrub_span:
             full_count = sum(1 for a in articles if a.confidence == ResultConfidence.FULL)
             snippet_count = sum(1 for a in articles if a.confidence == ResultConfidence.SNIPPET)
             injected_count = sum(1 for a in articles if a.confidence == ResultConfidence.INJECTED)
+            tavily_extract_count = sum(1 for a in articles if a.content_source == "tavily_extract")
+            jina_count = sum(1 for a in articles if a.content_source == "jina")
+            snippet_source_count = sum(1 for a in articles if a.content_source == "snippet")
             scrub_span.set_attribute("confidence.full_count", full_count)
             scrub_span.set_attribute("confidence.snippet_count", snippet_count)
             scrub_span.set_attribute("confidence.injected_count", injected_count)
+            scrub_span.set_attribute("search.tavily_extract_count", tavily_extract_count)
+            scrub_span.set_attribute("search.jina_count", jina_count)
+            scrub_span.set_attribute("search.snippet_count", snippet_source_count)
 
         span.set_attribute("articles_kept", len(articles))
         logger.info(
