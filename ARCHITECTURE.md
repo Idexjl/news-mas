@@ -156,6 +156,47 @@ easier to reason about and test independently.
 
 ---
 
+## 2b. API Gateway
+
+**Files:** `src/api/gateway.py`, `src/api/schemas.py`, `run_api.py`
+
+FastAPI gateway that exposes the pipeline to the React frontend. Runs on port 8000.
+Start with: `python run_api.py` or `uvicorn src.api.gateway:app --host 0.0.0.0 --port 8000 --reload`.
+
+### Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/topics` | List all active topics for `user-joe` |
+| `POST` | `/api/topics` | Create a topic subscription |
+| `PUT` | `/api/topics/{topic_id}` | Update topic text, constraints, or active flag |
+| `DELETE` | `/api/topics/{topic_id}` | Delete a topic |
+| `GET` | `/api/digests` | List digest run summaries (sorted by `generated_at` desc) |
+| `GET` | `/api/digests/latest` | Most recent digest (full payload) |
+| `GET` | `/api/digests/{run_id}` | Specific digest by run_id |
+| `POST` | `/api/runs/trigger` | Fire-and-forget pipeline trigger; returns `run_id` immediately |
+| `GET` | `/api/runs/{run_id}/status` | Poll run status (in-memory for gateway runs; falls back to `RunRepository`) |
+| `GET` | `/api/runs/history` | Recent runs with pass/tombstone counts (in-memory + `RunRepository`) |
+| `POST` | `/api/feedback/summary` | Thumbs up/down on a digest entry |
+| `POST` | `/api/feedback/topic` | Topic-level relevance score |
+| `POST` | `/api/feedback/missed` | Report a missing story |
+| `POST` | `/api/feedback/override` | Override a tombstone decision |
+| `GET` | `/api/health` | Service health check |
+
+### Design notes
+
+- **`user_id` hardcoded to `"user-joe"`** — Google OIDC auth is deferred (see §12).
+- **Run trigger is fire-and-forget:** `asyncio.create_task()` launches `run_full_pipeline()` and returns immediately. Run status is tracked in a module-level `_run_status` dict for the process lifetime. Completed runs are also persisted to `RunRepository` by `finalize_phase2`.
+- **CORS:** `localhost:3001` and `localhost:5173` allowed (Vite dev and CRA dev servers).
+- **Rate limiting:** 60 req/min on read endpoints, 30 req/min on writes, 5 req/min on run trigger.
+- **Security headers:** `X-Content-Type-Options`, `X-Frame-Options`, `X-XSS-Protection` on all responses.
+- **OTel:** every endpoint is wrapped in a named span via `get_tracer("news-mas-gateway")`.
+- **Storage:** uses `FernetStorage` with the same `FERNET_KEY` / `DATA_DIR` as the rest of the system. Repositories initialised in the lifespan context manager.
+- **Feedback:** written to `FeedbackRepository` (collection `data/feedback/`) with `type` discriminator matching the schema in §11.
+- **Digest sort order:** `list_digests` loads all digest records to sort by `generated_at`; acceptable for development volumes.
+
+---
+
 ## 2a. Scheduler
 
 **Files:** `src/scheduler/scheduler.py`, `src/scheduler/api.py`
