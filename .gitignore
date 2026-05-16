@@ -79,3 +79,9 @@ alembic/versions/*.pyc
 *.pid
 *.seed
 *.pid.lock
+
+entra-secrets.json
+
+entra-scope-map.json
+
+entra-scope-map.json
