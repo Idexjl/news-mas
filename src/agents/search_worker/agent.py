@@ -56,6 +56,21 @@ _REQUIRED_CAPABILITY = "search.web"
 _INJECTION_THRESHOLD: float = float(os.getenv("INJECTION_DETECTION_THRESHOLD", "0.85"))
 _content_detector = ContentInjectionDetector(threshold=_INJECTION_THRESHOLD)
 
+# Known legitimate publisher hostnames that should never be flagged by Pytector.
+# Pytector's DeBERTa model occasionally returns confidence=1.0 on gaming/security
+# journalism sites whose editorial vocabulary overlaps with injection patterns.
+TRUSTED_DOMAINS: frozenset[str] = frozenset({
+    "warhammer-community.com",
+    "www.warhammer-community.com",
+    "community.warhammer.com",
+    "belloflostsouls.net",
+    "www.belloflostsouls.net",
+    "spikeybits.com",
+    "www.spikeybits.com",
+    "thehackernews.com",
+    "www.thehackernews.com",
+})
+
 # ── egress metrics ─────────────────────────────────────────────────────────────
 
 _egress_instr: dict[str, Any] | None = None
@@ -260,10 +275,20 @@ async def _process_result(
         span.set_attribute("egress.scrubbed", pii_count > 0)
         span.set_attribute("egress.pii_count", pii_count)
 
-        # ML-based injection detection — DeBERTa understands context so security
-        # articles, SQL tutorials, and sports reports are correctly identified as safe.
-        is_safe_content, injection_confidence = _content_detector.is_safe(scrubbed_content)
-        injection_detected = not is_safe_content
+        # Trusted domains bypass Pytector — known legitimate publisher sites whose
+        # editorial vocabulary can trigger false positives at confidence=1.0.
+        if hostname in TRUSTED_DOMAINS:
+            logger.info(
+                "injection_check_skipped_trusted_domain",
+                extra={"egress_host": hostname},
+            )
+            injection_detected = False
+            injection_confidence = 0.0
+        else:
+            # ML-based injection detection — DeBERTa understands context so security
+            # articles, SQL tutorials, and sports reports are correctly identified as safe.
+            is_safe, injection_confidence = _content_detector.is_safe(scrubbed_content)
+            injection_detected = not is_safe
 
         span.set_attribute("egress.injection_detected", injection_detected)
         span.set_attribute("egress.injection_confidence", round(injection_confidence, 4))

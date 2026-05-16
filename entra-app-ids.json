@@ -1,0 +1,11 @@
+{
+  "news-mas-gateway": "a1aded72-72bb-4e93-af2d-a81c4768976d",
+  "news-mas-filter-agent": "8554892b-d1b7-4d3c-93c3-b32a9ad520fe",
+  "news-mas-heat-scorer": "00f91552-51da-4d18-9c64-4bd739200029",
+  "news-mas-reviewer": "51d72a3e-23f8-4032-832e-8b8d486537ae",
+  "news-mas-phase1-judge": "c8714b4f-b870-4f72-9640-49b31a177bfc",
+  "news-mas-summarizer": "7fad701e-8c98-4606-b5ea-8668ee6e7162",
+  "news-mas-relevance-gate": "0b4ed320-ed05-4035-bfd6-13c1e5a5b93e",
+  "news-mas-selector": "36674cc6-2aed-4fe5-842e-f85c8864c423",
+  "news-mas-search-worker": "5357b453-505c-40da-9eb5-a169563d0117"
+}

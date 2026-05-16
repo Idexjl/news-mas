@@ -69,6 +69,12 @@ SearchWorker → HeatScorer → FilterAgent → Selector → Phase1Judge
   The custom httpx+BeautifulSoup page fetcher was removed — it caused widespread
   HTTPStatusErrors on anti-scraping sites. `SearchResult` carries the new `content_source`
   field so downstream agents and OTel spans can see extraction provenance.
+  Injection detection uses Pytector (DeBERTa) at `INJECTION_DETECTION_THRESHOLD` (default 0.85).
+  A module-level `TRUSTED_DOMAINS` frozenset (`warhammer-community.com`, `belloflostsouls.net`,
+  `spikeybits.com`, `thehackernews.com`, and their `www.` variants) bypasses Pytector entirely
+  for known legitimate publishers where DeBERTa produces false positives at confidence=1.0. A
+  bypass is logged at INFO (`injection_check_skipped_trusted_domain`). PII/PHI scrub still runs
+  on all content regardless of trusted-domain status.
   Each result is returned as a `SearchResult` (extends `RawArticle`) with a `ResultConfidence` value:
   `FULL` (Tavily extract), `PARTIAL` (Jina), `SNIPPET` (snippet fallback), `INJECTED` (discarded),
   or `SCRUBBED` (PHI removed). Injected articles are returned with empty content so the count

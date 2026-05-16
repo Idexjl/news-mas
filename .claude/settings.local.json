@@ -33,7 +33,10 @@
       "Bash(INTEGRATION_TESTS=true python -m pytest tests/integration/test_relevance_gate_live.py::test_invalid_confidence_defaults_to_low -v)",
       "WebSearch",
       "WebFetch(domain:github.com)",
-      "WebFetch(domain:pytector.readthedocs.io)"
+      "WebFetch(domain:pytector.readthedocs.io)",
+      "Bash(python3 -c \"import json; d = open\\('/c/Users/Joe/OneDrive/Desktop/git/news-mas/entra-app-ids.json', encoding='utf-16'\\).read\\(\\); print\\(d\\)\")",
+      "Bash(python3 -c \"import json; d = open\\('/c/Users/Joe/OneDrive/Desktop/git/news-mas/entra-app-ids.json', encoding='utf-8-sig'\\).read\\(\\); print\\(d\\)\")",
+      "PowerShell(python -c \"import ast, pathlib; ast.parse\\(pathlib.Path\\('scripts/setup_entra_scopes.py'\\).read_text\\(\\)\\); print\\('syntax OK'\\)\")"
     ]
   }
 }
