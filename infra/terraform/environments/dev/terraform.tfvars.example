@@ -1,0 +1,25 @@
+env            = "dev"
+azure_location = "eastus"
+aws_region     = "us-west-2"
+
+tenant_id       = "a020e373-9d33-4b2e-b3fd-67728fd2423c"
+subscription_id = "90cfd0a6-6efc-4a12-a7ce-2f4e2bc4a356"
+
+# Agent app registration client IDs (from entra-app-ids.json)
+gateway_client_id          = "a1aded72-72bb-4e93-af2d-a81c4768976d"
+search_worker_client_id    = "5357b453-505c-40da-9eb5-a169563d0117"
+heat_scorer_client_id      = "00f91552-51da-4d18-9c64-4bd739200029"
+filter_agent_client_id     = "8554892b-d1b7-4d3c-93c3-b32a9ad520fe"
+selector_client_id         = "36674cc6-2aed-4fe5-842e-f85c8864c423"
+phase1_judge_client_id     = "c8714b4f-b870-4f72-9640-49b31a177bfc"
+summarizer_client_id       = "7fad701e-8c98-4606-b5ea-8668ee6e7162"
+reviewer_client_id         = "51d72a3e-23f8-4032-832e-8b8d486537ae"
+relevance_gate_client_id   = "0b4ed320-ed05-4035-bfd6-13c1e5a5b93e"
+
+# AWS / EC2 — leave ami_id and subnet_ids empty to use module defaults
+# (latest Deep Learning GPU AMI + default VPC subnets).
+ami_id     = ""
+subnet_ids = []
+
+# Lock this down to the Container Apps outbound NAT IP in production.
+container_apps_cidr_blocks = ["0.0.0.0/0"]
